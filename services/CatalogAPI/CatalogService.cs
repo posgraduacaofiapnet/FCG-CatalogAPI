@@ -111,8 +111,9 @@ public sealed class CatalogService(CatalogDbContext dbContext, ICatalogEventPubl
             .Join(dbContext.Games,
                 item => item.GameId,
                 game => game.Id,
-                (item, game) => new LibraryGameResponse(game.Id, game.Title, game.Price, item.AcquiredAt))
-            .OrderBy(item => item.Title)
+                (item, game) => new { item, game })
+            .OrderBy(result => result.game.Title)
+            .Select(result => new LibraryGameResponse(result.game.Id, result.game.Title, result.game.Price, result.item.AcquiredAt))
             .ToListAsync(cancellationToken);
     }
 
