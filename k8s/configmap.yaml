@@ -6,3 +6,5 @@ data:
   RabbitMq__Host: rabbitmq
   RabbitMq__Username: guest
   RabbitMq__PaymentProcessedQueue: catalog-payment-processed
+  Jwt__Issuer: UsersAPI
+  Jwt__Audience: FCG

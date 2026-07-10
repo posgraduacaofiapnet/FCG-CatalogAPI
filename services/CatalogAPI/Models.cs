@@ -66,6 +66,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
 }
 
 public sealed record CreateGameRequest(string Title, string Description, decimal Price);
+public sealed record UpdateGameRequest(string Title, string Description, decimal Price);
 public sealed record PurchaseGameRequest(Guid UserId, Guid GameId);
 public sealed record GameResponse(Guid Id, string Title, string Description, decimal Price);
 public sealed record LibraryGameResponse(Guid GameId, string Title, decimal Price, DateTime AcquiredAt);

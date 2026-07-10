@@ -12,6 +12,16 @@ public sealed class CreateGameRequestValidator : AbstractValidator<CreateGameReq
     }
 }
 
+public sealed class UpdateGameRequestValidator : AbstractValidator<UpdateGameRequest>
+{
+    public UpdateGameRequestValidator()
+    {
+        RuleFor(request => request.Title).NotEmpty().MaximumLength(150);
+        RuleFor(request => request.Description).NotEmpty().MaximumLength(500);
+        RuleFor(request => request.Price).GreaterThan(0);
+    }
+}
+
 public sealed class PurchaseGameRequestValidator : AbstractValidator<PurchaseGameRequest>
 {
     public PurchaseGameRequestValidator()
