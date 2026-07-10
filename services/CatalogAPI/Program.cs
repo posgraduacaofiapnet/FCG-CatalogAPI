@@ -1,7 +1,11 @@
+using System.Security.Claims;
+using System.Text;
 using CatalogAPI;
 using FluentValidation;
 using MassTransit;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -12,7 +16,24 @@ builder.Services.AddDbContext<CatalogDbContext>(options =>
 builder.Services.AddScoped<CatalogService>();
 builder.Services.AddScoped<ICatalogEventPublisher, MassTransitCatalogEventPublisher>();
 builder.Services.AddScoped<IValidator<CreateGameRequest>, CreateGameRequestValidator>();
+builder.Services.AddScoped<IValidator<UpdateGameRequest>, UpdateGameRequestValidator>();
 builder.Services.AddScoped<IValidator<PurchaseGameRequest>, PurchaseGameRequestValidator>();
+
+var jwtKey = builder.Configuration["Jwt:Key"] ?? throw new InvalidOperationException("Jwt:Key is required.");
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.ASCII.GetBytes(jwtKey)),
+            ValidateIssuer = true,
+            ValidIssuer = builder.Configuration["Jwt:Issuer"] ?? "UsersAPI",
+            ValidateAudience = true,
+            ValidAudience = builder.Configuration["Jwt:Audience"] ?? "FCG"
+        };
+    });
+builder.Services.AddAuthorization();
 
 builder.Services.AddMassTransit(bus =>
 {
@@ -42,6 +63,14 @@ using (var scope = app.Services.CreateScope())
 
 app.UseSwagger();
 app.UseSwaggerUI();
+app.UseAuthentication();
+app.UseAuthorization();
+
+static bool IsOwner(ClaimsPrincipal user, Guid userId)
+{
+    var claim = user.FindFirstValue("user_id");
+    return Guid.TryParse(claim, out var callerId) && callerId == userId;
+}
 
 app.MapGet("/health", () => Results.Ok(new { status = "Healthy", service = "CatalogAPI" }));
 
@@ -68,22 +97,61 @@ app.MapPost("/api/games", async (
 
     var game = await service.CreateGameAsync(request, cancellationToken);
     return Results.Created($"/api/games/{game.Id}", game);
-});
+}).RequireAuthorization();
 
-app.MapPost("/api/library/purchase", async (
-    PurchaseGameRequest request,
-    IValidator<PurchaseGameRequest> validator,
+app.MapPut("/api/games/{id:guid}", async (
+    Guid id,
+    UpdateGameRequest request,
+    IValidator<UpdateGameRequest> validator,
     CatalogService service,
     CancellationToken cancellationToken) =>
 {
     var validation = await validator.ValidateAsync(request, cancellationToken);
-    return validation.IsValid
-        ? await service.PurchaseAsync(request, cancellationToken)
-        : Results.ValidationProblem(validation.ToDictionary());
-});
+    if (!validation.IsValid)
+    {
+        return Results.ValidationProblem(validation.ToDictionary());
+    }
 
-app.MapGet("/api/library/{userId:guid}", async (Guid userId, CatalogService service, CancellationToken cancellationToken) =>
-    Results.Ok(await service.GetLibraryAsync(userId, cancellationToken)));
+    var game = await service.UpdateGameAsync(id, request, cancellationToken);
+    return game is null ? Results.NotFound(new { error = "Games.NotFound" }) : Results.Ok(game);
+}).RequireAuthorization();
+
+app.MapDelete("/api/games/{id:guid}", async (Guid id, CatalogService service, CancellationToken cancellationToken) =>
+{
+    var deleted = await service.DeleteGameAsync(id, cancellationToken);
+    return deleted ? Results.NoContent() : Results.NotFound(new { error = "Games.NotFound" });
+}).RequireAuthorization();
+
+app.MapPost("/api/library/purchase", async (
+    PurchaseGameRequest request,
+    IValidator<PurchaseGameRequest> validator,
+    ClaimsPrincipal user,
+    CatalogService service,
+    CancellationToken cancellationToken) =>
+{
+    var validation = await validator.ValidateAsync(request, cancellationToken);
+    if (!validation.IsValid)
+    {
+        return Results.ValidationProblem(validation.ToDictionary());
+    }
+
+    if (!IsOwner(user, request.UserId))
+    {
+        return Results.Forbid();
+    }
+
+    return await service.PurchaseAsync(request, cancellationToken);
+}).RequireAuthorization();
+
+app.MapGet("/api/library/{userId:guid}", async (Guid userId, ClaimsPrincipal user, CatalogService service, CancellationToken cancellationToken) =>
+{
+    if (!IsOwner(user, userId))
+    {
+        return Results.Forbid();
+    }
+
+    return Results.Ok(await service.GetLibraryAsync(userId, cancellationToken));
+}).RequireAuthorization();
 
 app.Run();
 

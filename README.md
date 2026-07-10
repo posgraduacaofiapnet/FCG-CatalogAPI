@@ -19,9 +19,13 @@ Part of **FIAP Cloud Games (FCG)** — Tech Challenge Phase 2.
 | `GET` | `/api/games` | List all games | No |
 | `GET` | `/api/games/{id}` | Get game by ID | No |
 | `POST` | `/api/games` | Create a new game | Yes |
-| `POST` | `/api/library/purchase` | Purchase a game | Yes |
-| `GET` | `/api/library/{userId}` | Get user's game library | Yes |
+| `PUT` | `/api/games/{id}` | Update a game | Yes |
+| `DELETE` | `/api/games/{id}` | Deactivate a game (soft delete) | Yes |
+| `POST` | `/api/library/purchase` | Purchase a game | Yes (must be the owner) |
+| `GET` | `/api/library/{userId}` | Get user's game library | Yes (must be the owner) |
 | `GET` | `/health` | Health check | No |
+
+Auth uses a JWT Bearer token issued by **FCG-UsersAPI** (`POST /api/auth/login`). Endpoints marked "must be the owner" compare the token's `user_id` claim against the `userId` in the request — a token can only purchase or list a library for its own user, returning `403 Forbidden` otherwise.
 
 ### Create Game payload
 
@@ -30,6 +34,16 @@ Part of **FIAP Cloud Games (FCG)** — Tech Challenge Phase 2.
   "title": "Cyber FIAP",
   "description": "Demo game for purchase flow.",
   "price": 99.90
+}
+```
+
+### Update Game payload
+
+```json
+{
+  "title": "Cyber FIAP - Remastered",
+  "description": "Updated demo game for purchase flow.",
+  "price": 79.90
 }
 ```
 
@@ -64,6 +78,9 @@ User → POST /api/library/purchase
 | Variable | Description |
 |----------|-------------|
 | `ConnectionStrings__DefaultConnection` | SQL Server connection string |
+| `Jwt__Key` | HMAC signing key for validating tokens — must match FCG-UsersAPI's `Jwt__Key` |
+| `Jwt__Issuer` | Expected token issuer — must match FCG-UsersAPI's `Jwt__Issuer` |
+| `Jwt__Audience` | Expected token audience — must match FCG-UsersAPI's `Jwt__Audience` |
 | `RabbitMq__Host` | RabbitMQ hostname |
 | `RabbitMq__Username` | RabbitMQ username |
 | `RabbitMq__Password` | RabbitMQ password |

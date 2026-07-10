@@ -48,6 +48,35 @@ public sealed class CatalogService(CatalogDbContext dbContext, ICatalogEventPubl
         return game is null ? null : Map(game);
     }
 
+    public async Task<GameResponse?> UpdateGameAsync(Guid id, UpdateGameRequest request, CancellationToken cancellationToken)
+    {
+        var game = await dbContext.Games.FirstOrDefaultAsync(game => game.Id == id && game.IsActive, cancellationToken);
+        if (game is null)
+        {
+            return null;
+        }
+
+        game.Title = request.Title;
+        game.Description = request.Description;
+        game.Price = request.Price;
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return Map(game);
+    }
+
+    public async Task<bool> DeleteGameAsync(Guid id, CancellationToken cancellationToken)
+    {
+        var game = await dbContext.Games.FirstOrDefaultAsync(game => game.Id == id && game.IsActive, cancellationToken);
+        if (game is null)
+        {
+            return false;
+        }
+
+        game.IsActive = false;
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return true;
+    }
+
     public async Task<IResult> PurchaseAsync(PurchaseGameRequest request, CancellationToken cancellationToken)
     {
         var game = await dbContext.Games.FirstOrDefaultAsync(game => game.Id == request.GameId && game.IsActive, cancellationToken);

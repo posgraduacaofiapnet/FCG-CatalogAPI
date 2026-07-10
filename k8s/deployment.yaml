@@ -34,3 +34,20 @@ spec:
                 secretKeyRef:
                   name: catalog-api-secrets
                   key: RabbitMq__Password
+            - name: Jwt__Key
+              valueFrom:
+                secretKeyRef:
+                  name: catalog-api-secrets
+                  key: Jwt__Key
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
