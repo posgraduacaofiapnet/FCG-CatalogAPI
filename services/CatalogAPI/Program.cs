@@ -10,7 +10,35 @@ using Microsoft.IdentityModel.Tokens;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddSwaggerGen(options =>
+{
+    options.SwaggerDoc("v1", new() { Title = "FCG Catalog API", Version = "v1" });
+    
+    options.AddSecurityDefinition("Bearer", new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+    {
+        Name = "Authorization",
+        Type = Microsoft.OpenApi.Models.SecuritySchemeType.ApiKey,
+        Scheme = "Bearer",
+        BearerFormat = "JWT",
+        In = Microsoft.OpenApi.Models.ParameterLocation.Header,
+        Description = "Insira o token JWT desta forma: Bearer {seu_token}"
+    });
+
+    options.AddSecurityRequirement(new Microsoft.OpenApi.Models.OpenApiSecurityRequirement
+    {
+        {
+            new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+            {
+                Reference = new Microsoft.OpenApi.Models.OpenApiReference
+                {
+                    Type = Microsoft.OpenApi.Models.ReferenceType.SecurityScheme,
+                    Id = "Bearer"
+                }
+            },
+            Array.Empty<string>()
+        }
+    });
+});
 builder.Services.AddDbContext<CatalogDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
 builder.Services.AddScoped<CatalogService>();
@@ -34,6 +62,8 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         };
     });
 builder.Services.AddAuthorization();
+builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
+builder.Services.AddProblemDetails();
 
 builder.Services.AddMassTransit(bus =>
 {
@@ -61,6 +91,7 @@ using (var scope = app.Services.CreateScope())
     await dbContext.Database.EnsureCreatedAsync();
 }
 
+app.UseExceptionHandler();
 app.UseSwagger();
 app.UseSwaggerUI();
 app.UseAuthentication();
@@ -74,8 +105,15 @@ static bool IsOwner(ClaimsPrincipal user, Guid userId)
 
 app.MapGet("/health", () => Results.Ok(new { status = "Healthy", service = "CatalogAPI" }));
 
-app.MapGet("/api/games", async (CatalogService service, CancellationToken cancellationToken) =>
-    Results.Ok(await service.GetGamesAsync(cancellationToken)));
+app.MapGet("/api/games", async (
+    CatalogService service,
+    CancellationToken cancellationToken,
+    int? page,
+    int? pageSize) =>
+{
+    var pagination = PaginationParameters.From(page, pageSize);
+    return Results.Ok(await service.GetGamesAsync(pagination, cancellationToken));
+});
 
 app.MapGet("/api/games/{id:guid}", async (Guid id, CatalogService service, CancellationToken cancellationToken) =>
 {
@@ -97,7 +135,7 @@ app.MapPost("/api/games", async (
 
     var game = await service.CreateGameAsync(request, cancellationToken);
     return Results.Created($"/api/games/{game.Id}", game);
-}).RequireAuthorization();
+}).RequireAuthorization(policy => policy.RequireRole("Admin"));
 
 app.MapPut("/api/games/{id:guid}", async (
     Guid id,
@@ -114,13 +152,13 @@ app.MapPut("/api/games/{id:guid}", async (
 
     var game = await service.UpdateGameAsync(id, request, cancellationToken);
     return game is null ? Results.NotFound(new { error = "Games.NotFound" }) : Results.Ok(game);
-}).RequireAuthorization();
+}).RequireAuthorization(policy => policy.RequireRole("Admin"));
 
 app.MapDelete("/api/games/{id:guid}", async (Guid id, CatalogService service, CancellationToken cancellationToken) =>
 {
     var deleted = await service.DeleteGameAsync(id, cancellationToken);
     return deleted ? Results.NoContent() : Results.NotFound(new { error = "Games.NotFound" });
-}).RequireAuthorization();
+}).RequireAuthorization(policy => policy.RequireRole("Admin"));
 
 app.MapPost("/api/library/purchase", async (
     PurchaseGameRequest request,

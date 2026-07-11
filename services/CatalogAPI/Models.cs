@@ -70,3 +70,35 @@ public sealed record UpdateGameRequest(string Title, string Description, decimal
 public sealed record PurchaseGameRequest(Guid UserId, Guid GameId);
 public sealed record GameResponse(Guid Id, string Title, string Description, decimal Price);
 public sealed record LibraryGameResponse(Guid GameId, string Title, decimal Price, DateTime AcquiredAt);
+
+/// <summary>Parâmetros de paginação reutilizáveis.</summary>
+public sealed record PaginationParameters(int Page, int PageSize)
+{
+    public const int DefaultPage = 1;
+    public const int DefaultPageSize = 10;
+    public const int MaxPageSize = 100;
+
+    public int Skip => (Page - 1) * PageSize;
+
+    public static PaginationParameters From(int? page, int? pageSize)
+    {
+        var p = Math.Max(1, page ?? DefaultPage);
+        var ps = Math.Clamp(pageSize ?? DefaultPageSize, 1, MaxPageSize);
+        return new PaginationParameters(p, ps);
+    }
+}
+
+/// <summary>Resultado paginado idêntico ao da Fase 1.</summary>
+public sealed record PagedResult<T>(
+    IReadOnlyList<T> Items,
+    int Page,
+    int PageSize,
+    int TotalCount)
+{
+    public int TotalPages => TotalCount == 0
+        ? 0
+        : (int)Math.Ceiling(TotalCount / (double)PageSize);
+
+    public bool HasPreviousPage => Page > 1;
+    public bool HasNextPage => Page < TotalPages;
+}
