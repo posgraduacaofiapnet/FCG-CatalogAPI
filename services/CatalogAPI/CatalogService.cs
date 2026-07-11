@@ -9,11 +9,12 @@ public interface ICatalogEventPublisher
     Task PublishOrderPlacedAsync(OrderPlacedEvent message, CancellationToken cancellationToken);
 }
 
-public sealed class MassTransitCatalogEventPublisher(IPublishEndpoint publisher) : ICatalogEventPublisher
+public sealed class MassTransitCatalogEventPublisher(IPublishEndpoint publisher, CorrelationContext correlationContext) : ICatalogEventPublisher
 {
     public Task PublishOrderPlacedAsync(OrderPlacedEvent message, CancellationToken cancellationToken)
     {
-        return publisher.Publish(message, cancellationToken);
+        return publisher.Publish(message, context =>
+            context.Headers.Set(CorrelationId.HeaderName, correlationContext.Value), cancellationToken);
     }
 }
 
@@ -157,6 +158,8 @@ public sealed class PaymentProcessedConsumer(CatalogService catalogService, ILog
 {
     public async Task Consume(ConsumeContext<PaymentProcessedEvent> context)
     {
+        var correlationId = CorrelationId.From(context.Headers);
+        using var _ = Serilog.Context.LogContext.PushProperty("CorrelationId", correlationId);
         logger.LogInformation("Pagamento {Status} recebido para pedido {OrderId}.", context.Message.Status, context.Message.OrderId);
         await catalogService.ProcessPaymentAsync(context.Message, context.CancellationToken);
     }
