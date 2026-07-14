@@ -34,13 +34,21 @@ public sealed class CatalogService(CatalogDbContext dbContext, ICatalogEventPubl
         return Map(game);
     }
 
-    public async Task<IReadOnlyList<GameResponse>> GetGamesAsync(CancellationToken cancellationToken)
+    public async Task<PagedResult<GameResponse>> GetGamesAsync(PaginationParameters pagination, CancellationToken cancellationToken)
     {
-        return await dbContext.Games
+        var query = dbContext.Games
             .Where(game => game.IsActive)
-            .OrderBy(game => game.Title)
+            .OrderBy(game => game.Title);
+
+        var totalCount = await query.CountAsync(cancellationToken);
+
+        var items = await query
+            .Skip(pagination.Skip)
+            .Take(pagination.PageSize)
             .Select(game => Map(game))
             .ToListAsync(cancellationToken);
+
+        return new PagedResult<GameResponse>(items, pagination.Page, pagination.PageSize, totalCount);
     }
 
     public async Task<GameResponse?> GetGameAsync(Guid id, CancellationToken cancellationToken)
@@ -84,6 +92,15 @@ public sealed class CatalogService(CatalogDbContext dbContext, ICatalogEventPubl
         if (game is null)
         {
             return Results.NotFound(new { error = "Games.NotFound" });
+        }
+
+        var alreadyOwned = await dbContext.LibraryItems.AnyAsync(
+            item => item.UserId == request.UserId && item.GameId == request.GameId,
+            cancellationToken);
+
+        if (alreadyOwned)
+        {
+            return Results.Conflict(new { error = "Library.GameAlreadyOwned" });
         }
 
         var order = new PurchaseOrder
