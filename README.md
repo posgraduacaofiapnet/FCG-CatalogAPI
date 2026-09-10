@@ -14,6 +14,7 @@ Parte do **FIAP Cloud Games (FCG)** — Tech Challenge Fase 2.
 - JWT Bearer Authentication
 - Swagger / OpenAPI
 - Serilog (logs estruturados em JSON)
+- Prometheus-net (Métricas de aplicação)
 
 ---
 
@@ -29,6 +30,7 @@ Parte do **FIAP Cloud Games (FCG)** — Tech Challenge Fase 2.
 | `POST` | `/api/library/purchase` | Solicita a compra de um jogo | Sim (dono) |
 | `GET` | `/api/library/{userId}` | Retorna a biblioteca do usuário | Sim (dono) |
 | `GET` | `/health` | Health check | Não |
+| `GET` | `/metrics` | Métricas no padrão Prometheus | Não |
 
 A autenticação usa token JWT Bearer emitido pela **FCG-UsersAPI** (`POST /api/auth/login`). Os endpoints marcados como **(dono)** comparam o claim `user_id` do token com o `userId` da requisição — um token só pode comprar ou consultar a biblioteca do seu próprio usuário, retornando `403 Forbidden` caso contrário.
 

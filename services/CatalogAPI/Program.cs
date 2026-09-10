@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using System.Text;
 using CatalogAPI;
+using Prometheus;
 using FluentValidation;
 using MassTransit;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -102,11 +103,14 @@ using (var scope = app.Services.CreateScope())
 
 app.UseExceptionHandler();
 app.UseMiddleware<CorrelationIdMiddleware>();
+app.UseHttpMetrics();
 app.UseSerilogRequestLogging();
 app.UseSwagger();
 app.UseSwaggerUI();
 app.UseAuthentication();
 app.UseAuthorization();
+
+app.MapMetrics();
 
 static bool IsOwner(ClaimsPrincipal user, Guid userId)
 {
