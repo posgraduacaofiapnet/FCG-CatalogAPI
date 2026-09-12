@@ -105,7 +105,7 @@ Usuário → POST /api/library/purchase   (nao existe POST /api/orders)
 | `RabbitMq__PaymentProcessedQueue` | Nome da fila para resultados de pagamento |
 | `Sqs__NotificationsQueueUrl` | URL da fila SQS `fcg-notifications-queue` |
 | `Sqs__Region` | Região AWS da fila (ex: `us-east-1`) |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Credenciais para a CatalogAPI publicar na SQS |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Opcional. Prefira `aws configure` (Docker monta `~/.aws`) ou o Secret `catalog-aws-credentials` no Kubernetes |
 
 ---
 
@@ -118,7 +118,8 @@ cd FCG-Orchestration
 docker compose up --build
 ```
 
-Swagger disponível em: http://localhost:5102/swagger
+Swagger direto: http://localhost:5102/swagger  
+Entrada via Kong: http://localhost:8000 (`/api/games`, `/api/library`)
 
 ### Kubernetes
 
@@ -139,11 +140,14 @@ kubectl apply -f .
 kubectl get pods
 kubectl get services
 
-# 5. Acesse via port-forward
-kubectl port-forward service/catalog-api 5102:80
+# 5. Credenciais AWS (sem .env) e port-forward do Gateway
+cd ../FCG-Orchestration
+.\scripts\sync-aws-credentials.ps1
+kubectl port-forward service/kong-gateway 8000:80
 ```
 
-Swagger disponível em: http://localhost:5102/swagger
+Entrada via Kong: http://localhost:8000  
+Swagger direto (opcional): `kubectl port-forward service/catalog-api 5102:80`
 
 #### Manifestos Kubernetes
 
