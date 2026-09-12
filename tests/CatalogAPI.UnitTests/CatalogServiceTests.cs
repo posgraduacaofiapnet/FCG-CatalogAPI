@@ -2,6 +2,10 @@ using Bogus;
 using CatalogAPI;
 using FCG.Contracts;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Distributed;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 
 namespace CatalogAPI.UnitTests;
 
@@ -96,4 +100,102 @@ public sealed class CatalogServiceTests(CatalogFixture fixture) : IClassFixture<
     [Fact]
     public void CorrelationId_PreservesValidValue() =>
         Assert.Equal("catalog-flow", CorrelationId.Normalize("catalog-flow"));
+
+    [Fact]
+    public async Task GetGamesAsync_UsesCacheOnSecondCall()
+    {
+        await using var db = fixture.CreateDbContext();
+        var cache = new FakeGameCatalogCache();
+        var service = new CatalogService(db, new FakeCatalogEventPublisher(), gameListCache: cache);
+        await service.CreateGameAsync(fixture.CreateGame(), CancellationToken.None);
+        var pagination = PaginationParameters.From(1, 10);
+
+        var first = await service.GetGamesAsync(pagination, CancellationToken.None);
+        db.Games.RemoveRange(db.Games);
+        await db.SaveChangesAsync();
+        var second = await service.GetGamesAsync(pagination, CancellationToken.None);
+
+        Assert.Equal(1, cache.Misses);
+        Assert.Equal(1, cache.Hits);
+        Assert.Equal(first.TotalCount, second.TotalCount);
+        Assert.Equal(first.Items[0].Id, second.Items[0].Id);
+    }
+
+    [Fact]
+    public async Task CreateGameAsync_InvalidatesCachedList()
+    {
+        await using var db = fixture.CreateDbContext();
+        var cache = new FakeGameCatalogCache();
+        var service = new CatalogService(db, new FakeCatalogEventPublisher(), gameListCache: cache);
+        await service.CreateGameAsync(fixture.CreateGame(), CancellationToken.None);
+        var pagination = PaginationParameters.From(1, 10);
+
+        await service.GetGamesAsync(pagination, CancellationToken.None);
+        var created = await service.CreateGameAsync(fixture.CreateGame(), CancellationToken.None);
+        var listed = await service.GetGamesAsync(pagination, CancellationToken.None);
+
+        Assert.True(cache.Invalidations >= 2);
+        Assert.Equal(2, listed.TotalCount);
+        Assert.Contains(listed.Items, game => game.Id == created.Id);
+    }
+
+    [Fact]
+    public async Task DistributedCache_InvalidateChangesVersionAndMisses()
+    {
+        var memory = new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions()));
+        var cache = new DistributedGameCatalogCache(memory, NullLogger<DistributedGameCatalogCache>.Instance);
+        var pagination = PaginationParameters.From(1, 10);
+        var page = new PagedResult<GameResponse>(
+            [new GameResponse(Guid.NewGuid(), "Cyber FIAP", "Demo", 99.9m)],
+            1,
+            10,
+            1);
+
+        await cache.SetListAsync(pagination, page, CancellationToken.None);
+        var hit = await cache.TryGetListAsync(pagination, CancellationToken.None);
+        await cache.InvalidateListAsync(CancellationToken.None);
+        var afterInvalidate = await cache.TryGetListAsync(pagination, CancellationToken.None);
+
+        Assert.NotNull(hit);
+        Assert.Equal("Cyber FIAP", hit.Items[0].Title);
+        Assert.Null(afterInvalidate);
+    }
+}
+
+public sealed class FakeGameCatalogCache : IGameCatalogCache
+{
+    private readonly Dictionary<string, PagedResult<GameResponse>> _store = [];
+    private int _version = 1;
+
+    public int Hits { get; private set; }
+    public int Misses { get; private set; }
+    public int Invalidations { get; private set; }
+
+    public Task<PagedResult<GameResponse>?> TryGetListAsync(PaginationParameters pagination, CancellationToken cancellationToken)
+    {
+        if (_store.TryGetValue(Key(pagination), out var value))
+        {
+            Hits++;
+            return Task.FromResult<PagedResult<GameResponse>?>(value);
+        }
+
+        Misses++;
+        return Task.FromResult<PagedResult<GameResponse>?>(null);
+    }
+
+    public Task SetListAsync(PaginationParameters pagination, PagedResult<GameResponse> value, CancellationToken cancellationToken)
+    {
+        _store[Key(pagination)] = value;
+        return Task.CompletedTask;
+    }
+
+    public Task InvalidateListAsync(CancellationToken cancellationToken)
+    {
+        Invalidations++;
+        _version++;
+        _store.Clear();
+        return Task.CompletedTask;
+    }
+
+    private string Key(PaginationParameters pagination) => $"{_version}:{pagination.Page}:{pagination.PageSize}";
 }

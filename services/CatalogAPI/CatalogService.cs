@@ -21,7 +21,8 @@ public sealed class MassTransitCatalogEventPublisher(IPublishEndpoint publisher,
 public sealed class CatalogService(
     CatalogDbContext dbContext,
     ICatalogEventPublisher publisher,
-    IOrderPaidQueuePublisher? orderPaidQueue = null)
+    IOrderPaidQueuePublisher? orderPaidQueue = null,
+    IGameCatalogCache? gameListCache = null)
 {
     public async Task<GameResponse> CreateGameAsync(CreateGameRequest request, CancellationToken cancellationToken)
     {
@@ -34,11 +35,21 @@ public sealed class CatalogService(
 
         dbContext.Games.Add(game);
         await dbContext.SaveChangesAsync(cancellationToken);
+        await InvalidateGameListCacheAsync(cancellationToken);
         return Map(game);
     }
 
     public async Task<PagedResult<GameResponse>> GetGamesAsync(PaginationParameters pagination, CancellationToken cancellationToken)
     {
+        if (gameListCache is not null)
+        {
+            var cached = await gameListCache.TryGetListAsync(pagination, cancellationToken);
+            if (cached is not null)
+            {
+                return cached;
+            }
+        }
+
         var query = dbContext.Games
             .Where(game => game.IsActive)
             .OrderBy(game => game.Title);
@@ -51,7 +62,14 @@ public sealed class CatalogService(
             .Select(game => Map(game))
             .ToListAsync(cancellationToken);
 
-        return new PagedResult<GameResponse>(items, pagination.Page, pagination.PageSize, totalCount);
+        var result = new PagedResult<GameResponse>(items, pagination.Page, pagination.PageSize, totalCount);
+
+        if (gameListCache is not null)
+        {
+            await gameListCache.SetListAsync(pagination, result, cancellationToken);
+        }
+
+        return result;
     }
 
     public async Task<GameResponse?> GetGameAsync(Guid id, CancellationToken cancellationToken)
@@ -73,6 +91,7 @@ public sealed class CatalogService(
         game.Price = request.Price;
 
         await dbContext.SaveChangesAsync(cancellationToken);
+        await InvalidateGameListCacheAsync(cancellationToken);
         return Map(game);
     }
 
@@ -86,6 +105,7 @@ public sealed class CatalogService(
 
         game.IsActive = false;
         await dbContext.SaveChangesAsync(cancellationToken);
+        await InvalidateGameListCacheAsync(cancellationToken);
         return true;
     }
 
@@ -171,6 +191,9 @@ public sealed class CatalogService(
             .Select(result => new LibraryGameResponse(result.game.Id, result.game.Title, result.game.Price, result.item.AcquiredAt))
             .ToListAsync(cancellationToken);
     }
+
+    private Task InvalidateGameListCacheAsync(CancellationToken cancellationToken) =>
+        gameListCache?.InvalidateListAsync(cancellationToken) ?? Task.CompletedTask;
 
     private static GameResponse Map(Game game)
     {

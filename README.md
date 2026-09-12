@@ -14,6 +14,7 @@ Parte do **FIAP Cloud Games (FCG)** — Tech Challenge Fase 2.
 - JWT Bearer Authentication
 - Swagger / OpenAPI
 - Serilog (logs estruturados em JSON)
+- Redis (`IDistributedCache` / StackExchange.Redis) para cache da listagem de jogos
 
 ---
 
@@ -105,6 +106,7 @@ Usuário → POST /api/library/purchase   (nao existe POST /api/orders)
 | `RabbitMq__PaymentProcessedQueue` | Nome da fila para resultados de pagamento |
 | `Sqs__NotificationsQueueUrl` | URL da fila SQS `fcg-notifications-queue` |
 | `Sqs__Region` | Região AWS da fila (ex: `us-east-1`) |
+| `ConnectionStrings__Redis` | Host do Redis (`localhost:6379` local, `redis:6379` no Compose/K8s). Sem essa variável a API usa cache em memória. |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Opcional. Prefira `aws configure` (Docker monta `~/.aws`) ou o Secret `catalog-aws-credentials` no Kubernetes |
 
 ---
@@ -170,6 +172,8 @@ dotnet test FCG-CatalogAPI.sln
 ```
 
 Os testes utilizam **xUnit**, **Bogus** para geração de dados fictícios e o provider **InMemory** do Entity Framework Core para isolar a camada de persistência sem banco real.
+
+A CatalogAPI cacheia `GET /api/games` no Redis (TTL 5 minutos). Create/update/delete de jogo invalidam o cache. Sem Redis configurado, a API cai para cache em memória.
 
 ---
 
