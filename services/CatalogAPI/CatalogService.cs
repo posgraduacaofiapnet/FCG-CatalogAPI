@@ -18,7 +18,10 @@ public sealed class MassTransitCatalogEventPublisher(IPublishEndpoint publisher,
     }
 }
 
-public sealed class CatalogService(CatalogDbContext dbContext, ICatalogEventPublisher publisher)
+public sealed class CatalogService(
+    CatalogDbContext dbContext,
+    ICatalogEventPublisher publisher,
+    IOrderPaidQueuePublisher? orderPaidQueue = null)
 {
     public async Task<GameResponse> CreateGameAsync(CreateGameRequest request, CancellationToken cancellationToken)
     {
@@ -117,6 +120,11 @@ public sealed class CatalogService(CatalogDbContext dbContext, ICatalogEventPubl
         await dbContext.SaveChangesAsync(cancellationToken);
 
         await publisher.PublishOrderPlacedAsync(new OrderPlacedEvent(order.Id, order.UserId, order.GameId, order.GameTitle, order.Price, order.CreatedAt), cancellationToken);
+
+        if (orderPaidQueue is not null)
+        {
+            await orderPaidQueue.PublishAsync(order.Id, order.UserId, order.GameId, cancellationToken);
+        }
 
         return Results.Accepted($"/api/orders/{order.Id}", new { order.Id, order.Status });
     }

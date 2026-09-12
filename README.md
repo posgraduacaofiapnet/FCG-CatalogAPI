@@ -67,7 +67,8 @@ A autenticação usa token JWT Bearer emitido pela **FCG-UsersAPI** (`POST /api/
 
 | Direção | Evento | Gatilho |
 |---------|--------|---------|
-| Publica | `OrderPlacedEvent` | Após solicitação de compra |
+| Publica | `OrderPlacedEvent` | Após `POST /api/library/purchase` (RabbitMQ → PaymentsAPI) |
+| Publica | `OrderPaid` | Após a mesma compra, na fila SQS `fcg-notifications-queue` (Lambda de e-mail) |
 | Consome | `PaymentProcessedEvent` | Adiciona jogo à biblioteca quando pagamento é aprovado |
 
 ---
@@ -75,14 +76,17 @@ A autenticação usa token JWT Bearer emitido pela **FCG-UsersAPI** (`POST /api/
 ## Fluxo de Compra (Event-Driven)
 
 ```
-Usuário → POST /api/library/purchase
+Usuário → POST /api/library/purchase   (nao existe POST /api/orders)
+  → CatalogAPI cria o pedido e responde 202 { id, status }
   → CatalogAPI publica OrderPlacedEvent (RabbitMQ)
+  → CatalogAPI publica OrderPaid (SQS fcg-notifications-queue)
+      → Lambda fcg-notifications-function registra notification_sent (e-mail simulado)
     → PaymentsAPI consome e simula o processamento
       → PaymentsAPI publica PaymentProcessedEvent (Aprovado | Rejeitado)
         → CatalogAPI consome:
             se Aprovado → adiciona jogo à biblioteca do usuário
         → NotificationsAPI consome:
-            se Aprovado → loga e-mail de confirmação de compra
+            se Aprovado → loga e-mail de confirmação de compra (container)
 ```
 
 ---
@@ -99,6 +103,9 @@ Usuário → POST /api/library/purchase
 | `RabbitMq__Username` | Usuário do RabbitMQ |
 | `RabbitMq__Password` | Senha do RabbitMQ |
 | `RabbitMq__PaymentProcessedQueue` | Nome da fila para resultados de pagamento |
+| `Sqs__NotificationsQueueUrl` | URL da fila SQS `fcg-notifications-queue` |
+| `Sqs__Region` | Região AWS da fila (ex: `us-east-1`) |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Credenciais para a CatalogAPI publicar na SQS |
 
 ---
 

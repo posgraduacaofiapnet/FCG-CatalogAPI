@@ -1,5 +1,7 @@
 using System.Security.Claims;
 using System.Text;
+using Amazon;
+using Amazon.SQS;
 using CatalogAPI;
 using FluentValidation;
 using MassTransit;
@@ -52,6 +54,12 @@ builder.Services.AddDbContext<CatalogDbContext>(options =>
 builder.Services.AddScoped<CatalogService>();
 builder.Services.AddScoped<CorrelationContext>();
 builder.Services.AddScoped<ICatalogEventPublisher, MassTransitCatalogEventPublisher>();
+builder.Services.AddSingleton<IAmazonSQS>(_ =>
+{
+    var region = builder.Configuration["Sqs:Region"] ?? "us-east-1";
+    return new AmazonSQSClient(RegionEndpoint.GetBySystemName(region));
+});
+builder.Services.AddScoped<IOrderPaidQueuePublisher, SqsOrderPaidQueuePublisher>();
 builder.Services.AddScoped<IValidator<CreateGameRequest>, CreateGameRequestValidator>();
 builder.Services.AddScoped<IValidator<UpdateGameRequest>, UpdateGameRequestValidator>();
 builder.Services.AddScoped<IValidator<PurchaseGameRequest>, PurchaseGameRequestValidator>();
