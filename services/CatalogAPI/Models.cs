@@ -1,3 +1,4 @@
+using MassTransit;
 using Microsoft.EntityFrameworkCore;
 
 namespace CatalogAPI;
@@ -17,8 +18,9 @@ public sealed class PurchaseOrder
     public Guid UserId { get; set; }
     public Guid GameId { get; set; }
     public string GameTitle { get; set; } = string.Empty;
+    public string UserEmail { get; set; } = string.Empty;
     public decimal Price { get; set; }
-    public string Status { get; set; } = "Pending";
+    public string Status { get; set; } = OrderStatuses.Pending;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
 
@@ -35,6 +37,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
     public DbSet<Game> Games => Set<Game>();
     public DbSet<PurchaseOrder> Orders => Set<PurchaseOrder>();
     public DbSet<LibraryItem> LibraryItems => Set<LibraryItem>();
+    public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -52,8 +55,13 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             builder.HasKey(order => order.Id);
             builder.Property(order => order.Id).ValueGeneratedNever();
             builder.Property(order => order.GameTitle).IsRequired().HasMaxLength(150);
+            builder.Property(order => order.UserEmail).IsRequired().HasMaxLength(320);
             builder.Property(order => order.Price).HasColumnType("decimal(18,2)");
             builder.Property(order => order.Status).IsRequired().HasMaxLength(30);
+            builder.HasIndex(order => new { order.UserId, order.GameId })
+                .IsUnique()
+                .HasDatabaseName("IX_Orders_UserId_GameId_Pending")
+                .HasFilter("[Status] = 'Pending'");
         });
 
         modelBuilder.Entity<LibraryItem>(builder =>
@@ -62,6 +70,33 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             builder.Property(item => item.Id).ValueGeneratedNever();
             builder.HasIndex(item => new { item.UserId, item.GameId }).IsUnique();
         });
+
+        modelBuilder.Entity<OutboxMessage>(builder =>
+        {
+            builder.ToTable("OutboxMessages", tableBuilder =>
+            {
+                tableBuilder.HasCheckConstraint("CK_OutboxMessages_Attempts", "[Attempts] >= 0");
+                tableBuilder.HasCheckConstraint("CK_OutboxMessages_Payload_IsJson", "ISJSON([Payload]) = 1");
+                tableBuilder.HasCheckConstraint("CK_OutboxMessages_EventType_NotEmpty", "LEN(LTRIM(RTRIM([EventType]))) > 0");
+            });
+            builder.HasKey(message => message.Id);
+            builder.Property(message => message.Id).ValueGeneratedNever();
+            builder.Property(message => message.EventType).IsRequired().HasMaxLength(100);
+            builder.Property(message => message.IsSuccessful).HasDefaultValue(false);
+            builder.Property(message => message.CreatedAt).IsRequired();
+            builder.Property(message => message.Payload).IsRequired().HasColumnType("nvarchar(max)");
+            builder.Property(message => message.Attempts).HasDefaultValue(0);
+            builder.HasIndex(message => new { message.NextAttemptAt, message.CreatedAt, message.Id })
+                .HasDatabaseName("IX_OutboxMessages_Pending_NextAttemptAt_CreatedAt")
+                .HasFilter("[IsSuccessful] = 0 AND [Attempts] < 10");
+            builder.HasIndex(message => new { message.CreatedAt, message.Id })
+                .HasDatabaseName("IX_OutboxMessages_Successful_CreatedAt")
+                .HasFilter("[IsSuccessful] = 1");
+        });
+
+        modelBuilder.AddInboxStateEntity(entity => entity.ToTable("InboxState", "messaging"));
+        modelBuilder.AddOutboxStateEntity(entity => entity.ToTable("OutboxState", "messaging"));
+        modelBuilder.AddOutboxMessageEntity(entity => entity.ToTable("OutboxMessage", "messaging"));
     }
 }
 

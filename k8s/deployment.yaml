@@ -12,6 +12,29 @@ spec:
       labels:
         app: catalog-api
     spec:
+      initContainers:
+        - name: database-schema
+          image: mcr.microsoft.com/mssql-tools
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              SQLCMD=/opt/mssql-tools18/bin/sqlcmd
+              if [ ! -x "$SQLCMD" ]; then SQLCMD=/opt/mssql-tools/bin/sqlcmd; fi
+              until "$SQLCMD" -S sqlserver,1433 -U sa -P "$MSSQL_SA_PASSWORD" -C -Q "SELECT 1"; do sleep 3; done
+              "$SQLCMD" -S sqlserver,1433 -U sa -P "$MSSQL_SA_PASSWORD" -C -b -i /scripts/000-create-databases.sql
+              "$SQLCMD" -S sqlserver,1433 -U sa -P "$MSSQL_SA_PASSWORD" -C -b -i /scripts/020-catalog-schema.sql
+          env:
+            - name: MSSQL_SA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sqlserver-secrets
+                  key: MSSQL_SA_PASSWORD
+          volumeMounts:
+            - name: database-scripts
+              mountPath: /scripts
+              readOnly: true
       containers:
         - name: catalog-api
           image: fcg-catalog-api:latest
@@ -39,24 +62,6 @@ spec:
                 secretKeyRef:
                   name: catalog-api-secrets
                   key: Jwt__Key
-            - name: AWS_ACCESS_KEY_ID
-              valueFrom:
-                secretKeyRef:
-                  name: catalog-aws-credentials
-                  key: AWS_ACCESS_KEY_ID
-                  optional: true
-            - name: AWS_SECRET_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: catalog-aws-credentials
-                  key: AWS_SECRET_ACCESS_KEY
-                  optional: true
-            - name: AWS_DEFAULT_REGION
-              valueFrom:
-                secretKeyRef:
-                  name: catalog-aws-credentials
-                  key: AWS_DEFAULT_REGION
-                  optional: true
           readinessProbe:
             httpGet:
               path: /health
@@ -69,3 +74,7 @@ spec:
               port: 8080
             initialDelaySeconds: 15
             periodSeconds: 20
+      volumes:
+        - name: database-scripts
+          configMap:
+            name: fcg-database-schema

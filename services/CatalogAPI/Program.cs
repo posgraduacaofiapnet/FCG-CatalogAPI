@@ -1,7 +1,5 @@
 using System.Security.Claims;
 using System.Text;
-using Amazon;
-using Amazon.SQS;
 using CatalogAPI;
 using FluentValidation;
 using MassTransit;
@@ -9,6 +7,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using MongoDB.Driver;
+using Prometheus;
 using Serilog;
 using Serilog.Formatting.Compact;
 
@@ -81,12 +80,6 @@ builder.Services.AddScoped<GameReviewService>();
 builder.Services.AddScoped<CatalogService>();
 builder.Services.AddScoped<CorrelationContext>();
 builder.Services.AddScoped<ICatalogEventPublisher, MassTransitCatalogEventPublisher>();
-builder.Services.AddSingleton<IAmazonSQS>(_ =>
-{
-    var region = builder.Configuration["Sqs:Region"] ?? "us-east-1";
-    return new AmazonSQSClient(RegionEndpoint.GetBySystemName(region));
-});
-builder.Services.AddScoped<IOrderPaidQueuePublisher, SqsOrderPaidQueuePublisher>();
 builder.Services.AddScoped<IValidator<CreateGameRequest>, CreateGameRequestValidator>();
 builder.Services.AddScoped<IValidator<UpdateGameRequest>, UpdateGameRequestValidator>();
 builder.Services.AddScoped<IValidator<PurchaseGameRequest>, PurchaseGameRequestValidator>();
@@ -113,6 +106,12 @@ builder.Services.AddProblemDetails();
 builder.Services.AddMassTransit(bus =>
 {
     bus.AddConsumer<PaymentProcessedConsumer>();
+    bus.AddEntityFrameworkOutbox<CatalogDbContext>(outbox =>
+    {
+        outbox.QueryDelay = TimeSpan.FromSeconds(1);
+        outbox.UseSqlServer();
+        outbox.UseBusOutbox();
+    });
 
     bus.UsingRabbitMq((context, cfg) =>
     {
@@ -130,15 +129,10 @@ builder.Services.AddMassTransit(bus =>
 
 var app = builder.Build();
 
-using (var scope = app.Services.CreateScope())
-{
-    var dbContext = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
-    await dbContext.Database.EnsureCreatedAsync();
-}
-
 app.UseExceptionHandler();
 app.UseMiddleware<CorrelationIdMiddleware>();
 app.UseSerilogRequestLogging();
+app.UseHttpMetrics();
 app.UseSwagger();
 app.UseSwaggerUI();
 app.UseAuthentication();
@@ -150,7 +144,11 @@ static bool IsOwner(ClaimsPrincipal user, Guid userId)
     return Guid.TryParse(claim, out var callerId) && callerId == userId;
 }
 
+static string? GetUserEmail(ClaimsPrincipal user) =>
+    user.FindFirstValue(ClaimTypes.Email) ?? user.FindFirstValue("email");
+
 app.MapGet("/health", () => Results.Ok(new { status = "Healthy", service = "CatalogAPI" }));
+app.MapMetrics();
 
 app.MapGet("/api/games", async (
     CatalogService service,
@@ -260,7 +258,13 @@ app.MapPost("/api/library/purchase", async (
         return Results.Forbid();
     }
 
-    return await service.PurchaseAsync(request, cancellationToken);
+    var userEmail = GetUserEmail(user);
+    if (string.IsNullOrWhiteSpace(userEmail))
+    {
+        return Results.Unauthorized();
+    }
+
+    return await service.PurchaseAsync(request, userEmail, cancellationToken);
 }).RequireAuthorization();
 
 app.MapGet("/api/library/{userId:guid}", async (Guid userId, ClaimsPrincipal user, CatalogService service, CancellationToken cancellationToken) =>

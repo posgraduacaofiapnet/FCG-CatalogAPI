@@ -26,11 +26,13 @@ public sealed class CatalogFixture
 public sealed class FakeCatalogEventPublisher : ICatalogEventPublisher
 {
     public OrderPlacedEvent? Published { get; private set; }
+    public Exception? Exception { get; init; }
 
     public Task PublishOrderPlacedAsync(OrderPlacedEvent message, CancellationToken cancellationToken)
     {
         Published = message;
-        return Task.CompletedTask;
+        var exception = Exception;
+        return exception is null ? Task.CompletedTask : Task.FromException(exception);
     }
 }
 
@@ -52,7 +54,7 @@ public sealed class CatalogServiceTests(CatalogFixture fixture) : IClassFixture<
     }
 
     [Fact]
-    public async Task PurchaseAsync_CreatesPendingOrderAndPublishesEvent()
+    public async Task PurchaseAsync_CreatesPendingOrderOutboxAndPaymentEvent()
     {
         await using var db = fixture.CreateDbContext();
         var publisher = new FakeCatalogEventPublisher();
@@ -60,12 +62,16 @@ public sealed class CatalogServiceTests(CatalogFixture fixture) : IClassFixture<
         var game = await service.CreateGameAsync(fixture.CreateGame(), CancellationToken.None);
         var userId = Guid.NewGuid();
 
-        await service.PurchaseAsync(new PurchaseGameRequest(userId, game.Id), CancellationToken.None);
+        await service.PurchaseAsync(new PurchaseGameRequest(userId, game.Id), "user@example.com", CancellationToken.None);
 
         var order = Assert.Single(await db.Orders.ToListAsync());
         Assert.Equal("Pending", order.Status);
         Assert.Equal(order.Id, publisher.Published?.OrderId);
         Assert.Equal(userId, publisher.Published?.UserId);
+        var outbox = Assert.Single(await db.OutboxMessages.ToListAsync());
+        Assert.Equal(NotificationEventTypes.OrderPlaced, outbox.EventType);
+        Assert.Contains(order.Id.ToString(), outbox.Payload);
+        Assert.Equal(0, outbox.Attempts);
     }
 
     [Fact]
@@ -75,7 +81,7 @@ public sealed class CatalogServiceTests(CatalogFixture fixture) : IClassFixture<
         var service = new CatalogService(db, new FakeCatalogEventPublisher());
         var game = await service.CreateGameAsync(fixture.CreateGame(), CancellationToken.None);
         var userId = Guid.NewGuid();
-        await service.PurchaseAsync(new PurchaseGameRequest(userId, game.Id), CancellationToken.None);
+        await service.PurchaseAsync(new PurchaseGameRequest(userId, game.Id), "user@example.com", CancellationToken.None);
         var order = Assert.Single(await db.Orders.ToListAsync());
         var payment = new PaymentProcessedEvent(order.Id, userId, game.Id, game.Title, game.Price,
             PaymentStatuses.Approved, DateTime.UtcNow);
@@ -85,6 +91,29 @@ public sealed class CatalogServiceTests(CatalogFixture fixture) : IClassFixture<
 
         Assert.Single(await db.LibraryItems.ToListAsync());
         Assert.Equal(PaymentStatuses.Approved, order.Status);
+        var outbox = await db.OutboxMessages.ToListAsync();
+        Assert.Equal(2, outbox.Count);
+        Assert.Single(outbox, message => message.EventType == NotificationEventTypes.PaymentProcessed);
+    }
+
+    [Fact]
+    public async Task PurchaseAsync_WhenBusOutboxRejectsMessage_DoesNotPersistOrderOrNotification()
+    {
+        await using var db = fixture.CreateDbContext();
+        var publisher = new FakeCatalogEventPublisher
+        {
+            Exception = new InvalidOperationException("Bus outbox unavailable")
+        };
+        var service = new CatalogService(db, publisher);
+        var game = await service.CreateGameAsync(fixture.CreateGame(), CancellationToken.None);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.PurchaseAsync(
+            new PurchaseGameRequest(Guid.NewGuid(), game.Id),
+            "user@example.com",
+            CancellationToken.None));
+
+        Assert.Empty(await db.Orders.ToListAsync());
+        Assert.Empty(await db.OutboxMessages.ToListAsync());
     }
 
     [Fact]
