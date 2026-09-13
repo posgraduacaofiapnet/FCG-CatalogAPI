@@ -30,3 +30,12 @@ public sealed class PurchaseGameRequestValidator : AbstractValidator<PurchaseGam
         RuleFor(request => request.GameId).NotEmpty();
     }
 }
+
+public sealed class CreateGameReviewRequestValidator : AbstractValidator<CreateGameReviewRequest>
+{
+    public CreateGameReviewRequestValidator()
+    {
+        RuleFor(request => request.Rating).InclusiveBetween(1, 5);
+        RuleFor(request => request.Comment).NotEmpty().MaximumLength(500);
+    }
+}

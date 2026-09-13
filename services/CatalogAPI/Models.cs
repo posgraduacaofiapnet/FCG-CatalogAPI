@@ -68,8 +68,11 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
 public sealed record CreateGameRequest(string Title, string Description, decimal Price);
 public sealed record UpdateGameRequest(string Title, string Description, decimal Price);
 public sealed record PurchaseGameRequest(Guid UserId, Guid GameId);
+public sealed record CreateGameReviewRequest(int Rating, string Comment);
 public sealed record GameResponse(Guid Id, string Title, string Description, decimal Price);
 public sealed record LibraryGameResponse(Guid GameId, string Title, decimal Price, DateTime AcquiredAt);
+public sealed record GameReviewResponse(
+    Guid Id, Guid GameId, Guid UserId, int Rating, string Comment, DateTime CreatedAt);
 
 /// <summary>Parâmetros de paginação reutilizáveis.</summary>
 public sealed record PaginationParameters(int Page, int PageSize)

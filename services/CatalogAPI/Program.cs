@@ -8,6 +8,7 @@ using MassTransit;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using MongoDB.Driver;
 using Serilog;
 using Serilog.Formatting.Compact;
 
@@ -68,6 +69,15 @@ else
 }
 
 builder.Services.AddSingleton<IGameCatalogCache, DistributedGameCatalogCache>();
+
+var mongoConnection = builder.Configuration.GetConnectionString("MongoDB")
+    ?? throw new InvalidOperationException("ConnectionStrings:MongoDB is required.");
+var mongoDatabaseName = builder.Configuration["Mongo:Database"] ?? "fcg_catalog";
+builder.Services.AddSingleton<IMongoClient>(_ => new MongoClient(mongoConnection));
+builder.Services.AddSingleton(sp => sp.GetRequiredService<IMongoClient>().GetDatabase(mongoDatabaseName));
+builder.Services.AddSingleton<IGameReviewStore, MongoGameReviewStore>();
+builder.Services.AddScoped<GameReviewService>();
+
 builder.Services.AddScoped<CatalogService>();
 builder.Services.AddScoped<CorrelationContext>();
 builder.Services.AddScoped<ICatalogEventPublisher, MassTransitCatalogEventPublisher>();
@@ -80,6 +90,7 @@ builder.Services.AddScoped<IOrderPaidQueuePublisher, SqsOrderPaidQueuePublisher>
 builder.Services.AddScoped<IValidator<CreateGameRequest>, CreateGameRequestValidator>();
 builder.Services.AddScoped<IValidator<UpdateGameRequest>, UpdateGameRequestValidator>();
 builder.Services.AddScoped<IValidator<PurchaseGameRequest>, PurchaseGameRequestValidator>();
+builder.Services.AddScoped<IValidator<CreateGameReviewRequest>, CreateGameReviewRequestValidator>();
 
 var jwtKey = builder.Configuration["Jwt:Key"] ?? throw new InvalidOperationException("Jwt:Key is required.");
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
@@ -156,6 +167,41 @@ app.MapGet("/api/games/{id:guid}", async (Guid id, CatalogService service, Cance
     var game = await service.GetGameAsync(id, cancellationToken);
     return game is null ? Results.NotFound(new { error = "Games.NotFound" }) : Results.Ok(game);
 });
+
+app.MapGet("/api/games/{id:guid}/reviews", async (
+    Guid id,
+    GameReviewService reviews,
+    CancellationToken cancellationToken) =>
+{
+    var list = await reviews.GetByGameIdAsync(id, cancellationToken);
+    return list is null ? Results.NotFound(new { error = "Games.NotFound" }) : Results.Ok(list);
+});
+
+app.MapPost("/api/games/{id:guid}/reviews", async (
+    Guid id,
+    CreateGameReviewRequest request,
+    IValidator<CreateGameReviewRequest> validator,
+    ClaimsPrincipal user,
+    GameReviewService reviews,
+    CancellationToken cancellationToken) =>
+{
+    var validation = await validator.ValidateAsync(request, cancellationToken);
+    if (!validation.IsValid)
+    {
+        return Results.ValidationProblem(validation.ToDictionary());
+    }
+
+    var claim = user.FindFirstValue("user_id");
+    if (!Guid.TryParse(claim, out var userId))
+    {
+        return Results.Unauthorized();
+    }
+
+    var created = await reviews.CreateAsync(id, userId, request, cancellationToken);
+    return created is null
+        ? Results.NotFound(new { error = "Games.NotFound" })
+        : Results.Created($"/api/games/{id}/reviews/{created.Id}", created);
+}).RequireAuthorization();
 
 app.MapPost("/api/games", async (
     CreateGameRequest request,

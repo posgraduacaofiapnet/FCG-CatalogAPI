@@ -15,6 +15,7 @@ Parte do **FIAP Cloud Games (FCG)** — Tech Challenge Fase 2.
 - Swagger / OpenAPI
 - Serilog (logs estruturados em JSON)
 - Redis (`IDistributedCache` / StackExchange.Redis) para cache da listagem de jogos
+- MongoDB (`MongoDB.Driver`) para avaliações de jogos
 
 ---
 
@@ -29,9 +30,11 @@ Parte do **FIAP Cloud Games (FCG)** — Tech Challenge Fase 2.
 | `DELETE` | `/api/games/{id}` | Desativa um jogo (soft delete) | Sim |
 | `POST` | `/api/library/purchase` | Solicita a compra de um jogo | Sim (dono) |
 | `GET` | `/api/library/{userId}` | Retorna a biblioteca do usuário | Sim (dono) |
+| `POST` | `/api/games/{id}/reviews` | Cria uma avaliação do jogo (MongoDB) | Sim (qualquer usuário autenticado) |
+| `GET` | `/api/games/{id}/reviews` | Lista avaliações do jogo | Não |
 | `GET` | `/health` | Health check | Não |
 
-A autenticação usa token JWT Bearer emitido pela **FCG-UsersAPI** (`POST /api/auth/login`). Os endpoints marcados como **(dono)** comparam o claim `user_id` do token com o `userId` da requisição — um token só pode comprar ou consultar a biblioteca do seu próprio usuário, retornando `403 Forbidden` caso contrário.
+A autenticação usa token JWT Bearer emitido pela **FCG-UsersAPI** (`POST /api/auth/login`). Os endpoints marcados como **(dono)** comparam o claim `user_id` do token com o `userId` da requisição — um token só pode comprar ou consultar a biblioteca do seu próprio usuário, retornando `403 Forbidden` caso contrário. O POST de review usa o `user_id` do token como autor (não vem no body).
 
 ### Payload: Criar Jogo
 
@@ -61,6 +64,17 @@ A autenticação usa token JWT Bearer emitido pela **FCG-UsersAPI** (`POST /api/
   "gameId": "<guid-do-jogo>"
 }
 ```
+
+### Payload: Avaliação de jogo
+
+```json
+{
+  "rating": 5,
+  "comment": "Excelente campanha."
+}
+```
+
+`rating` de 1 a 5. O autor é o `user_id` do JWT.
 
 ---
 
@@ -107,6 +121,8 @@ Usuário → POST /api/library/purchase   (nao existe POST /api/orders)
 | `Sqs__NotificationsQueueUrl` | URL da fila SQS `fcg-notifications-queue` |
 | `Sqs__Region` | Região AWS da fila (ex: `us-east-1`) |
 | `ConnectionStrings__Redis` | Host do Redis (`localhost:6379` local, `redis:6379` no Compose/K8s). Sem essa variável a API usa cache em memória. |
+| `ConnectionStrings__MongoDB` | URI do MongoDB (`mongodb://localhost:27017` local, `mongodb://mongo:27017` no Compose/K8s). Obrigatória. |
+| `Mongo__Database` | Database das avaliações (default `fcg_catalog`). |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Opcional. Prefira `aws configure` (Docker monta `~/.aws`) ou o Secret `catalog-aws-credentials` no Kubernetes |
 
 ---
@@ -121,7 +137,7 @@ docker compose up --build
 ```
 
 Swagger direto: http://localhost:5102/swagger  
-Entrada via Kong: http://localhost:8000 (`/api/games`, `/api/library`)
+Entrada via Kong: http://localhost:8000 (`/api/games`, `/api/library`, `/api/games/{id}/reviews`)
 
 ### Kubernetes
 
@@ -171,9 +187,9 @@ cd FCG-CatalogAPI
 dotnet test FCG-CatalogAPI.sln
 ```
 
-Os testes utilizam **xUnit**, **Bogus** para geração de dados fictícios e o provider **InMemory** do Entity Framework Core para isolar a camada de persistência sem banco real.
+Os testes utilizam **xUnit**, **Bogus** para geração de dados fictícios e o provider **InMemory** do Entity Framework Core para isolar a camada de persistência sem banco real. O serviço de reviews usa um store fake em memória — o MongoDB só entra no Compose/K8s.
 
-A CatalogAPI cacheia `GET /api/games` no Redis (TTL 5 minutos). Create/update/delete de jogo invalidam o cache. Sem Redis configurado, a API cai para cache em memória.
+A CatalogAPI cacheia `GET /api/games` no Redis (TTL 5 minutos). Create/update/delete de jogo invalidam o cache. Sem Redis configurado, a API cai para cache em memória. Avaliações ficam no MongoDB (`reviews` em `fcg_catalog`) e não passam pelo Redis.
 
 ---
 

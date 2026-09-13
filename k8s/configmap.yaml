@@ -11,3 +11,5 @@ data:
   Sqs__Region: us-east-1
   Sqs__NotificationsQueueUrl: https://sqs.us-east-1.amazonaws.com/174302433776/fcg-notifications-queue
   ConnectionStrings__Redis: redis:6379
+  ConnectionStrings__MongoDB: mongodb://mongo:27017
+  Mongo__Database: fcg_catalog
