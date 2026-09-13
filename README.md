@@ -1,190 +1,47 @@
-# FCG-CatalogAPI
+# FCG Catalog API
 
-Microserviço responsável pelo catálogo de jogos, início do fluxo de compra e gerenciamento da biblioteca do usuário. Publica `OrderPlacedEvent` e consome `PaymentProcessedEvent` para adicionar o jogo à biblioteca após aprovação do pagamento.
+Microserviço .NET 10 da Fase 3 para catálogo, compra, biblioteca e avaliações. SQL Server mantém
+jogos, pedidos, biblioteca e outbox; Redis atende o cache da listagem; MongoDB mantém avaliações;
+RabbitMQ integra o processamento de pagamento.
 
-Parte do **FIAP Cloud Games (FCG)** — Tech Challenge Fase 2.
+## Eventos e transações
 
----
+| Evento | Origem | Persistência de outbox |
+|---|---|---|
+| `OrderPlaced` | `POST /api/library/purchase` | Mesma transação do pedido `Pending` |
+| `PaymentProcessed` | consumo do resultado do PaymentsAPI | Mesma transação da atualização do pedido/biblioteca |
 
-## Tecnologias
+O `OrderPlacedEvent` destinado ao PaymentsAPI é gravado pelo Bus Outbox do MassTransit no schema
+`messaging`, dentro da mesma transação do pedido. O delivery service envia posteriormente ao
+RabbitMQ. A notificação também não é publicada diretamente pela API: o `FCG-Outbox-Processor` lê
+`dbo.OutboxMessages`, envia o payload integral à SQS e a `FCG-Notifications-Lambda` seleciona o
+serviço correspondente por um `switch` sobre o enum derivado do texto de `EventType`.
 
-- .NET 10 / ASP.NET Core
-- Entity Framework Core 10 + SQL Server
-- MassTransit + RabbitMQ
-- JWT Bearer Authentication
-- Swagger / OpenAPI
-- Serilog (logs estruturados em JSON)
+O e-mail do usuário é obtido do JWT e armazenado no pedido para que o evento final tenha todos os
+dados necessários sem chamada síncrona a outro serviço.
 
----
+## Principais endpoints
 
-## Endpoints
+| Método | Rota | Descrição |
+|---|---|---|
+| `GET/POST` | `/api/games` | Lista/cria jogos |
+| `GET/PUT/DELETE` | `/api/games/{id}` | Consulta/atualiza/desativa jogo |
+| `POST` | `/api/library/purchase` | Cria pedido e `OrderPlaced` |
+| `GET` | `/api/library/{userId}` | Consulta biblioteca |
+| `GET/POST` | `/api/games/{id}/reviews` | Avaliações em MongoDB |
+| `GET` | `/health` | Health check |
+| `GET` | `/metrics` | Métricas Prometheus |
 
-| Método | Rota | Descrição | Auth |
-|--------|------|-----------|------|
-| `GET` | `/api/games` | Lista todos os jogos | Não |
-| `GET` | `/api/games/{id}` | Busca jogo por ID | Não |
-| `POST` | `/api/games` | Cria um novo jogo | Sim |
-| `PUT` | `/api/games/{id}` | Atualiza um jogo | Sim |
-| `DELETE` | `/api/games/{id}` | Desativa um jogo (soft delete) | Sim |
-| `POST` | `/api/library/purchase` | Solicita a compra de um jogo | Sim (dono) |
-| `GET` | `/api/library/{userId}` | Retorna a biblioteca do usuário | Sim (dono) |
-| `GET` | `/health` | Health check | Não |
+## Banco e execução
 
-A autenticação usa token JWT Bearer emitido pela **FCG-UsersAPI** (`POST /api/auth/login`). Os endpoints marcados como **(dono)** comparam o claim `user_id` do token com o `userId` da requisição — um token só pode comprar ou consultar a biblioteca do seu próprio usuário, retornando `403 Forbidden` caso contrário.
-
-### Payload: Criar Jogo
-
-```json
-{
-  "title": "Cyber FIAP",
-  "description": "Jogo demo para o fluxo de compra.",
-  "price": 99.90
-}
-```
-
-### Payload: Atualizar Jogo
-
-```json
-{
-  "title": "Cyber FIAP - Remasterizado",
-  "description": "Jogo demo atualizado.",
-  "price": 79.90
-}
-```
-
-### Payload: Comprar Jogo
-
-```json
-{
-  "userId": "<guid-do-usuario>",
-  "gameId": "<guid-do-jogo>"
-}
-```
-
----
-
-## Eventos
-
-| Direção | Evento | Gatilho |
-|---------|--------|---------|
-| Publica | `OrderPlacedEvent` | Após solicitação de compra |
-| Consome | `PaymentProcessedEvent` | Adiciona jogo à biblioteca quando pagamento é aprovado |
-
----
-
-## Fluxo de Compra (Event-Driven)
-
-```
-Usuário → POST /api/library/purchase
-  → CatalogAPI publica OrderPlacedEvent (RabbitMQ)
-    → PaymentsAPI consome e simula o processamento
-      → PaymentsAPI publica PaymentProcessedEvent (Aprovado | Rejeitado)
-        → CatalogAPI consome:
-            se Aprovado → adiciona jogo à biblioteca do usuário
-        → NotificationsAPI consome:
-            se Aprovado → loga e-mail de confirmação de compra
-```
-
----
-
-## Variáveis de Ambiente
-
-| Variável | Descrição |
-|----------|-----------|
-| `ConnectionStrings__DefaultConnection` | String de conexão do SQL Server |
-| `Jwt__Key` | Chave HMAC para validação dos tokens — deve ser idêntica à da FCG-UsersAPI |
-| `Jwt__Issuer` | Emissor esperado do token — deve ser idêntico ao da FCG-UsersAPI |
-| `Jwt__Audience` | Audiência esperada do token — deve ser idêntica à da FCG-UsersAPI |
-| `RabbitMq__Host` | Hostname do RabbitMQ |
-| `RabbitMq__Username` | Usuário do RabbitMQ |
-| `RabbitMq__Password` | Senha do RabbitMQ |
-| `RabbitMq__PaymentProcessedQueue` | Nome da fila para resultados de pagamento |
-
----
-
-## Executando Localmente
-
-### Docker Compose (via FCG-Orchestration)
+O schema é responsabilidade da infraestrutura, incluindo `messaging.InboxState`,
+`messaging.OutboxMessage` e `messaging.OutboxState`. O Compose aguarda `database-init`; em Kubernetes,
+o `initContainer` aplica os scripts idempotentes antes da API. Para subir localmente:
 
 ```bash
 cd FCG-Orchestration
 docker compose up --build
 ```
 
-Swagger disponível em: http://localhost:5102/swagger
-
-### Kubernetes
-
-```bash
-# 1. Build da imagem local
-cd FCG-CatalogAPI
-docker build -t fcg-catalog-api:latest -f services/CatalogAPI/Dockerfile .
-
-# 2. Aplique a infra (RabbitMQ + SQL Server) primeiro
-cd ../FCG-Orchestration/k8s
-kubectl apply -f .
-
-# 3. Aplique os manifestos da CatalogAPI
-cd ../../FCG-CatalogAPI/k8s
-kubectl apply -f .
-
-# 4. Verifique os pods
-kubectl get pods
-kubectl get services
-
-# 5. Acesse via port-forward
-kubectl port-forward service/catalog-api 5102:80
-```
-
-Swagger disponível em: http://localhost:5102/swagger
-
-#### Manifestos Kubernetes
-
-| Arquivo | Tipo | Descrição |
-|---------|------|-----------|
-| `deployment.yaml` | Deployment | Define o Pod com 1 réplica, imagem, probes e referências a ConfigMap/Secret |
-| `service.yaml` | Service | Expõe a API internamente no cluster na porta 80 |
-| `configmap.yaml` | ConfigMap | Configurações não-sensíveis (RabbitMQ host/username, fila, Jwt Issuer/Audience) |
-| `secret.yaml` | Secret | Dados sensíveis em base64 (connection string, Jwt Key, RabbitMQ password) |
-
-As **readinessProbe** e **livenessProbe** do Deployment apontam para `/health` — o pod só recebe tráfego após o healthcheck passar.
-
----
-
-## Testes Unitários
-
-```bash
-cd FCG-CatalogAPI
-dotnet test FCG-CatalogAPI.sln
-```
-
-Os testes utilizam **xUnit**, **Bogus** para geração de dados fictícios e o provider **InMemory** do Entity Framework Core para isolar a camada de persistência sem banco real.
-
----
-
-## Estrutura da Solution
-
-```
-FCG-CatalogAPI/
-├── FCG-CatalogAPI.sln
-├── contracts/
-│   └── FCG.Contracts/        # Contratos de eventos compartilhados
-├── services/
-│   └── CatalogAPI/           # Projeto principal do serviço
-├── tests/
-│   └── CatalogAPI.Tests/     # Testes unitários (xUnit)
-└── k8s/                      # Manifestos Kubernetes
-    ├── deployment.yaml
-    ├── service.yaml
-    ├── configmap.yaml
-    └── secret.yaml
-```
-
----
-
-## Repositórios Relacionados
-
-- [FCG-Orchestration](https://github.com/posgraduacaofiapnet/FCG-Orchestration) — Docker Compose + infraestrutura K8s global
-- [FCG-UsersAPI](https://github.com/posgraduacaofiapnet/FCG-UsersAPI)
-- [FCG-PaymentsAPI](https://github.com/posgraduacaofiapnet/FCG-PaymentsAPI)
-- [FCG-NotificationsAPI](https://github.com/posgraduacaofiapnet/FCG-NotificationsAPI)
+A API fica em `http://localhost:5102` e as rotas públicas também passam pelo Kong em
+`http://localhost:8000`.

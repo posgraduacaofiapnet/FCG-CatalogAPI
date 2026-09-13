@@ -1,11 +1,5 @@
 namespace FCG.Contracts;
 
-public sealed record UserCreatedEvent(
-    Guid UserId,
-    string Name,
-    string Email,
-    DateTime CreatedAt);
-
 public sealed record OrderPlacedEvent(
     Guid OrderId,
     Guid UserId,

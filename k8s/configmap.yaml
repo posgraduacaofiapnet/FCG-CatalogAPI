@@ -8,3 +8,6 @@ data:
   RabbitMq__PaymentProcessedQueue: catalog-payment-processed
   Jwt__Issuer: UsersAPI
   Jwt__Audience: FCG
+  ConnectionStrings__Redis: redis:6379
+  ConnectionStrings__MongoDB: mongodb://mongo:27017
+  Mongo__Database: fcg_catalog

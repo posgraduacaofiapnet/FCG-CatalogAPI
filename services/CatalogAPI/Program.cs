@@ -6,6 +6,8 @@ using MassTransit;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using MongoDB.Driver;
+using Prometheus;
 using Serilog;
 using Serilog.Formatting.Compact;
 
@@ -49,12 +51,39 @@ builder.Services.AddSwaggerGen(options =>
 });
 builder.Services.AddDbContext<CatalogDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+
+var redisConnection = builder.Configuration.GetConnectionString("Redis")
+    ?? builder.Configuration["Redis:Configuration"];
+if (string.IsNullOrWhiteSpace(redisConnection))
+{
+    builder.Services.AddDistributedMemoryCache();
+}
+else
+{
+    builder.Services.AddStackExchangeRedisCache(options =>
+    {
+        options.Configuration = redisConnection;
+        options.InstanceName = "fcg:";
+    });
+}
+
+builder.Services.AddSingleton<IGameCatalogCache, DistributedGameCatalogCache>();
+
+var mongoConnection = builder.Configuration.GetConnectionString("MongoDB")
+    ?? throw new InvalidOperationException("ConnectionStrings:MongoDB is required.");
+var mongoDatabaseName = builder.Configuration["Mongo:Database"] ?? "fcg_catalog";
+builder.Services.AddSingleton<IMongoClient>(_ => new MongoClient(mongoConnection));
+builder.Services.AddSingleton(sp => sp.GetRequiredService<IMongoClient>().GetDatabase(mongoDatabaseName));
+builder.Services.AddSingleton<IGameReviewStore, MongoGameReviewStore>();
+builder.Services.AddScoped<GameReviewService>();
+
 builder.Services.AddScoped<CatalogService>();
 builder.Services.AddScoped<CorrelationContext>();
 builder.Services.AddScoped<ICatalogEventPublisher, MassTransitCatalogEventPublisher>();
 builder.Services.AddScoped<IValidator<CreateGameRequest>, CreateGameRequestValidator>();
 builder.Services.AddScoped<IValidator<UpdateGameRequest>, UpdateGameRequestValidator>();
 builder.Services.AddScoped<IValidator<PurchaseGameRequest>, PurchaseGameRequestValidator>();
+builder.Services.AddScoped<IValidator<CreateGameReviewRequest>, CreateGameReviewRequestValidator>();
 
 var jwtKey = builder.Configuration["Jwt:Key"] ?? throw new InvalidOperationException("Jwt:Key is required.");
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
@@ -77,6 +106,12 @@ builder.Services.AddProblemDetails();
 builder.Services.AddMassTransit(bus =>
 {
     bus.AddConsumer<PaymentProcessedConsumer>();
+    bus.AddEntityFrameworkOutbox<CatalogDbContext>(outbox =>
+    {
+        outbox.QueryDelay = TimeSpan.FromSeconds(1);
+        outbox.UseSqlServer();
+        outbox.UseBusOutbox();
+    });
 
     bus.UsingRabbitMq((context, cfg) =>
     {
@@ -94,15 +129,10 @@ builder.Services.AddMassTransit(bus =>
 
 var app = builder.Build();
 
-using (var scope = app.Services.CreateScope())
-{
-    var dbContext = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
-    await dbContext.Database.EnsureCreatedAsync();
-}
-
 app.UseExceptionHandler();
 app.UseMiddleware<CorrelationIdMiddleware>();
 app.UseSerilogRequestLogging();
+app.UseHttpMetrics();
 app.UseSwagger();
 app.UseSwaggerUI();
 app.UseAuthentication();
@@ -114,7 +144,11 @@ static bool IsOwner(ClaimsPrincipal user, Guid userId)
     return Guid.TryParse(claim, out var callerId) && callerId == userId;
 }
 
+static string? GetUserEmail(ClaimsPrincipal user) =>
+    user.FindFirstValue(ClaimTypes.Email) ?? user.FindFirstValue("email");
+
 app.MapGet("/health", () => Results.Ok(new { status = "Healthy", service = "CatalogAPI" }));
+app.MapMetrics();
 
 app.MapGet("/api/games", async (
     CatalogService service,
@@ -131,6 +165,41 @@ app.MapGet("/api/games/{id:guid}", async (Guid id, CatalogService service, Cance
     var game = await service.GetGameAsync(id, cancellationToken);
     return game is null ? Results.NotFound(new { error = "Games.NotFound" }) : Results.Ok(game);
 });
+
+app.MapGet("/api/games/{id:guid}/reviews", async (
+    Guid id,
+    GameReviewService reviews,
+    CancellationToken cancellationToken) =>
+{
+    var list = await reviews.GetByGameIdAsync(id, cancellationToken);
+    return list is null ? Results.NotFound(new { error = "Games.NotFound" }) : Results.Ok(list);
+});
+
+app.MapPost("/api/games/{id:guid}/reviews", async (
+    Guid id,
+    CreateGameReviewRequest request,
+    IValidator<CreateGameReviewRequest> validator,
+    ClaimsPrincipal user,
+    GameReviewService reviews,
+    CancellationToken cancellationToken) =>
+{
+    var validation = await validator.ValidateAsync(request, cancellationToken);
+    if (!validation.IsValid)
+    {
+        return Results.ValidationProblem(validation.ToDictionary());
+    }
+
+    var claim = user.FindFirstValue("user_id");
+    if (!Guid.TryParse(claim, out var userId))
+    {
+        return Results.Unauthorized();
+    }
+
+    var created = await reviews.CreateAsync(id, userId, request, cancellationToken);
+    return created is null
+        ? Results.NotFound(new { error = "Games.NotFound" })
+        : Results.Created($"/api/games/{id}/reviews/{created.Id}", created);
+}).RequireAuthorization();
 
 app.MapPost("/api/games", async (
     CreateGameRequest request,
@@ -189,7 +258,13 @@ app.MapPost("/api/library/purchase", async (
         return Results.Forbid();
     }
 
-    return await service.PurchaseAsync(request, cancellationToken);
+    var userEmail = GetUserEmail(user);
+    if (string.IsNullOrWhiteSpace(userEmail))
+    {
+        return Results.Unauthorized();
+    }
+
+    return await service.PurchaseAsync(request, userEmail, cancellationToken);
 }).RequireAuthorization();
 
 app.MapGet("/api/library/{userId:guid}", async (Guid userId, ClaimsPrincipal user, CatalogService service, CancellationToken cancellationToken) =>
