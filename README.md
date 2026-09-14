@@ -40,6 +40,8 @@ dados necessários sem chamada síncrona a outro serviço.
 | `POST` | `/api/library/purchase` | Cria pedido e `OrderPlaced` |
 | `GET` | `/api/library/{userId}` | Consulta biblioteca |
 | `GET/POST` | `/api/games/{id}/reviews` | Avaliações em MongoDB |
+| `GET` | `/api/notifications/status?limit=20` | Cruza os outboxes recentes com o status gravado pela Lambda no DynamoDB (Admin) |
+| `GET` | `/api/notifications/status/{eventId}` | Consulta uma notificação específica no outbox e DynamoDB (Admin) |
 | `GET` | `/health` | Health check |
 | `GET` | `/metrics` | Métricas Prometheus |
 
@@ -56,3 +58,7 @@ docker compose up --build
 
 A API fica em `http://localhost:5102` e as rotas públicas também passam pelo Kong em
 `http://localhost:8000`.
+
+Os endpoints de status não fazem varredura no DynamoDB. A API primeiro seleciona IDs existentes no
+outbox local do Catalog e consulta somente essas chaves. `lambdaProcessed: true` significa que a
+Lambda gravou `Status=Completed` na tabela `fcg-notification-idempotency`.
