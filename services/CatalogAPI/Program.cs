@@ -126,6 +126,11 @@ builder.Services.AddMassTransit(bus =>
         });
     });
 });
+builder.Services.AddOptions<MassTransitHostOptions>().Configure(options =>
+{
+    options.WaitUntilStarted = true;
+    options.StartTimeout = TimeSpan.FromMinutes(2);
+});
 
 var app = builder.Build();
 

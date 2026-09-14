@@ -189,6 +189,85 @@ public sealed class CatalogServiceTests(CatalogFixture fixture) : IClassFixture<
         Assert.Equal("Cyber FIAP", hit.Items[0].Title);
         Assert.Null(afterInvalidate);
     }
+
+    [Fact]
+    public async Task UpdateDeleteAndMissingGame_ReturnExpectedResults()
+    {
+        await using var db = fixture.CreateDbContext();
+        var service = new CatalogService(db, new FakeCatalogEventPublisher());
+        var created = await service.CreateGameAsync(fixture.CreateGame(), CancellationToken.None);
+
+        var updated = await service.UpdateGameAsync(
+            created.Id,
+            new UpdateGameRequest("Updated", "Updated description", 25m),
+            CancellationToken.None);
+        var missingUpdate = await service.UpdateGameAsync(Guid.NewGuid(), new UpdateGameRequest("X", "Y", 1m), CancellationToken.None);
+        var deleted = await service.DeleteGameAsync(created.Id, CancellationToken.None);
+        var deletedAgain = await service.DeleteGameAsync(created.Id, CancellationToken.None);
+
+        Assert.Equal("Updated", updated?.Title);
+        Assert.Null(missingUpdate);
+        Assert.True(deleted);
+        Assert.False(deletedAgain);
+        Assert.Null(await service.GetGameAsync(created.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task PurchaseAsync_WhenGameMissingOrAlreadyOwned_ReturnsExpectedStatus()
+    {
+        await using var db = fixture.CreateDbContext();
+        var service = new CatalogService(db, new FakeCatalogEventPublisher());
+        var userId = Guid.NewGuid();
+        var missing = await service.PurchaseAsync(
+            new PurchaseGameRequest(userId, Guid.NewGuid()), "user@example.com", CancellationToken.None);
+        var game = await service.CreateGameAsync(fixture.CreateGame(), CancellationToken.None);
+        await service.PurchaseAsync(new PurchaseGameRequest(userId, game.Id), "user@example.com", CancellationToken.None);
+        db.LibraryItems.Add(new LibraryItem { UserId = userId, GameId = game.Id });
+        await db.SaveChangesAsync();
+        var duplicate = await service.PurchaseAsync(
+            new PurchaseGameRequest(userId, game.Id), "user@example.com", CancellationToken.None);
+
+        Assert.Equal(404, ((Microsoft.AspNetCore.Http.IStatusCodeHttpResult)missing).StatusCode);
+        Assert.Equal(409, ((Microsoft.AspNetCore.Http.IStatusCodeHttpResult)duplicate).StatusCode);
+    }
+
+    [Fact]
+    public async Task ProcessPaymentAsync_RejectsMismatchedAndUnsupportedPayments()
+    {
+        await using var db = fixture.CreateDbContext();
+        var service = new CatalogService(db, new FakeCatalogEventPublisher());
+        var game = await service.CreateGameAsync(fixture.CreateGame(), CancellationToken.None);
+        var userId = Guid.NewGuid();
+        await service.PurchaseAsync(new PurchaseGameRequest(userId, game.Id), "user@example.com", CancellationToken.None);
+        var order = Assert.Single(await db.Orders.ToListAsync());
+
+        await service.ProcessPaymentAsync(
+            new PaymentProcessedEvent(Guid.NewGuid(), userId, game.Id, game.Title, game.Price, PaymentStatuses.Approved, DateTime.UtcNow),
+            CancellationToken.None);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.ProcessPaymentAsync(
+            new PaymentProcessedEvent(order.Id, Guid.NewGuid(), game.Id, game.Title, game.Price, PaymentStatuses.Approved, DateTime.UtcNow),
+            CancellationToken.None));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.ProcessPaymentAsync(
+            new PaymentProcessedEvent(order.Id, userId, game.Id, game.Title, game.Price, "Unknown", DateTime.UtcNow),
+            CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task RejectedPayment_DoesNotAddLibraryItemAndCanListLibrary()
+    {
+        await using var db = fixture.CreateDbContext();
+        var service = new CatalogService(db, new FakeCatalogEventPublisher());
+        var game = await service.CreateGameAsync(fixture.CreateGame(), CancellationToken.None);
+        var userId = Guid.NewGuid();
+        await service.PurchaseAsync(new PurchaseGameRequest(userId, game.Id), "user@example.com", CancellationToken.None);
+        var order = Assert.Single(await db.Orders.ToListAsync());
+
+        await service.ProcessPaymentAsync(new PaymentProcessedEvent(
+            order.Id, userId, game.Id, game.Title, game.Price, PaymentStatuses.Rejected, DateTime.UtcNow), CancellationToken.None);
+
+        Assert.Empty(await service.GetLibraryAsync(userId, CancellationToken.None));
+        Assert.Empty(await db.LibraryItems.ToListAsync());
+    }
 }
 
 public sealed class FakeGameCatalogCache : IGameCatalogCache
