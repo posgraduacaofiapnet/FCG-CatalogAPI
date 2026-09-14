@@ -1,5 +1,7 @@
 using System.Security.Claims;
 using System.Text;
+using Amazon;
+using Amazon.DynamoDBv2;
 using CatalogAPI;
 using Prometheus;
 using FluentValidation;
@@ -23,7 +25,7 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
 {
     options.SwaggerDoc("v1", new() { Title = "FCG Catalog API", Version = "v1" });
-    
+
     options.AddSecurityDefinition("Bearer", new Microsoft.OpenApi.Models.OpenApiSecurityScheme
     {
         Name = "Authorization",
@@ -68,6 +70,24 @@ else
 }
 
 builder.Services.AddSingleton<IGameCatalogCache, DistributedGameCatalogCache>();
+
+builder.Services.AddSingleton<IAmazonDynamoDB>(_ =>
+{
+    var regionName = builder.Configuration["AWS_REGION"] ?? "us-east-1";
+    var serviceUrl = builder.Configuration["Notifications:DynamoDbServiceUrl"];
+    var dynamoConfiguration = new AmazonDynamoDBConfig
+    {
+        RegionEndpoint = RegionEndpoint.GetBySystemName(regionName)
+    };
+    if (!string.IsNullOrWhiteSpace(serviceUrl))
+    {
+        dynamoConfiguration.ServiceURL = serviceUrl;
+        dynamoConfiguration.AuthenticationRegion = regionName;
+    }
+
+    return new AmazonDynamoDBClient(dynamoConfiguration);
+});
+builder.Services.AddScoped<INotificationProcessingStatusReader, DynamoDbNotificationProcessingStatusReader>();
 
 var mongoConnection = builder.Configuration.GetConnectionString("MongoDB")
     ?? throw new InvalidOperationException("ConnectionStrings:MongoDB is required.");
@@ -282,6 +302,24 @@ app.MapGet("/api/library/{userId:guid}", async (Guid userId, ClaimsPrincipal use
 
     return Results.Ok(await service.GetLibraryAsync(userId, cancellationToken));
 }).RequireAuthorization();
+
+app.MapGet("/api/notifications/status", async (
+    int? limit,
+    INotificationProcessingStatusReader statusReader,
+    CancellationToken cancellationToken) =>
+    Results.Ok(await statusReader.GetRecentAsync(limit, cancellationToken)))
+    .RequireAuthorization(policy => policy.RequireRole("Admin"));
+
+app.MapGet("/api/notifications/status/{eventId:guid}", async (
+    Guid eventId,
+    INotificationProcessingStatusReader statusReader,
+    CancellationToken cancellationToken) =>
+{
+    var status = await statusReader.GetByIdAsync(eventId, cancellationToken);
+    return status is null
+        ? Results.NotFound(new { error = "Notifications.EventNotFound" })
+        : Results.Ok(status);
+}).RequireAuthorization(policy => policy.RequireRole("Admin"));
 
 app.Run();
 

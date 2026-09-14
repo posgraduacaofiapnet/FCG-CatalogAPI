@@ -108,6 +108,33 @@ public sealed class ProgramTests : IClassFixture<CatalogApiFactory>
         Assert.Equal(HttpStatusCode.Forbidden, forbiddenPurchase.StatusCode);
     }
 
+    [Fact]
+    public async Task AdminCanReadLambdaProcessingStatus()
+    {
+        using var admin = AuthenticatedClient("Admin", Guid.NewGuid(), "admin@example.com");
+
+        var response = await admin.GetAsync("/api/notifications/status?limit=20");
+        var statuses = await response.Content.ReadFromJsonAsync<List<NotificationProcessingStatusResponse>>();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.NotNull(statuses);
+        Assert.Single(statuses);
+        Assert.True(statuses[0].LambdaProcessed);
+    }
+
+    [Fact]
+    public async Task NotificationStatus_RejectsNonAdminAndReturnsNotFoundForUnknownEvent()
+    {
+        using var user = AuthenticatedClient("User", Guid.NewGuid(), "user@example.com");
+        using var admin = AuthenticatedClient("Admin", Guid.NewGuid(), "admin@example.com");
+
+        var forbidden = await user.GetAsync("/api/notifications/status");
+        var missing = await admin.GetAsync($"/api/notifications/status/{Guid.NewGuid()}");
+
+        Assert.Equal(HttpStatusCode.Forbidden, forbidden.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+    }
+
     private HttpClient AuthenticatedClient(string role, Guid userId, string email)
     {
         var client = _factory.CreateClient();
@@ -149,6 +176,8 @@ public sealed class CatalogApiFactory : WebApplicationFactory<Program>
             services.AddSingleton<IGameReviewStore, FakeGameReviewStore>();
             services.RemoveAll<ICatalogEventPublisher>();
             services.AddScoped<ICatalogEventPublisher, FakeCatalogEventPublisher>();
+            services.RemoveAll<INotificationProcessingStatusReader>();
+            services.AddSingleton<INotificationProcessingStatusReader, FakeNotificationProcessingStatusReader>();
             services.RemoveAll<IHostedService>();
             services.AddAuthentication(options =>
             {
@@ -160,6 +189,31 @@ public sealed class CatalogApiFactory : WebApplicationFactory<Program>
                 _ => { });
         });
     }
+}
+
+public sealed class FakeNotificationProcessingStatusReader : INotificationProcessingStatusReader
+{
+    private static readonly NotificationProcessingStatusResponse CompletedStatus = new(
+        Guid.Parse("19938a4c-e93b-44bc-8027-0bf1cc9808d1"),
+        NotificationEventTypes.PaymentProcessed,
+        DateTimeOffset.Parse("2026-09-14T12:00:00Z"),
+        true,
+        1,
+        null,
+        true,
+        "Completed",
+        DateTimeOffset.Parse("2026-09-21T12:00:00Z"));
+
+    public Task<IReadOnlyList<NotificationProcessingStatusResponse>> GetRecentAsync(
+        int? limit,
+        CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<NotificationProcessingStatusResponse>>([CompletedStatus]);
+
+    public Task<NotificationProcessingStatusResponse?> GetByIdAsync(
+        Guid eventId,
+        CancellationToken cancellationToken) =>
+        Task.FromResult<NotificationProcessingStatusResponse?>(
+            eventId == CompletedStatus.Id ? CompletedStatus : null);
 }
 
 public sealed class TestAuthenticationHandler(
