@@ -37,8 +37,8 @@ spec:
               readOnly: true
       containers:
         - name: catalog-api
-          image: fcg-catalog-api:latest
-          imagePullPolicy: IfNotPresent
+          image: ghcr.io/posgraduacaofiapnet/fcg-catalog-api:latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 8080
           envFrom:
