@@ -1,13 +1,13 @@
 using System.Security.Claims;
 using System.Text;
 using CatalogAPI;
+using Prometheus;
 using FluentValidation;
 using MassTransit;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using MongoDB.Driver;
-using Prometheus;
 using Serilog;
 using Serilog.Formatting.Compact;
 
@@ -143,6 +143,8 @@ app.UseSwaggerUI();
 app.UseAuthentication();
 app.UseAuthorization();
 
+app.MapMetrics();
+
 static bool IsOwner(ClaimsPrincipal user, Guid userId)
 {
     var claim = user.FindFirstValue("user_id");
@@ -153,7 +155,6 @@ static string? GetUserEmail(ClaimsPrincipal user) =>
     user.FindFirstValue(ClaimTypes.Email) ?? user.FindFirstValue("email");
 
 app.MapGet("/health", () => Results.Ok(new { status = "Healthy", service = "CatalogAPI" }));
-app.MapMetrics();
 
 app.MapGet("/api/games", async (
     CatalogService service,

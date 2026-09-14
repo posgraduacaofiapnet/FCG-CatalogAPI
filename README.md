@@ -20,6 +20,17 @@ serviço correspondente por um `switch` sobre o enum derivado do texto de `Event
 O e-mail do usuário é obtido do JWT e armazenado no pedido para que o evento final tenha todos os
 dados necessários sem chamada síncrona a outro serviço.
 
+## Stack
+
+- .NET 10 / ASP.NET Core
+- Entity Framework Core 10 + SQL Server
+- MassTransit + RabbitMQ
+- Redis e MongoDB
+- JWT Bearer Authentication
+- Swagger / OpenAPI
+- Serilog (logs estruturados em JSON)
+- Prometheus-net (Métricas de aplicação)
+
 ## Principais endpoints
 
 | Método | Rota | Descrição |
