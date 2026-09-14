@@ -7,12 +7,20 @@ public class GlobalExceptionHandler(ILogger<GlobalExceptionHandler> logger) : IE
 {
     public async ValueTask<bool> TryHandleAsync(HttpContext context, Exception exception, CancellationToken cancellationToken)
     {
-        logger.LogError(exception, "Uma exceção não tratada ocorreu: {Message}", exception.Message);
+        var isBadRequest = exception is BadHttpRequestException;
+        if (isBadRequest)
+        {
+            logger.LogWarning(exception, "Requisição inválida: {Message}", exception.Message);
+        }
+        else
+        {
+            logger.LogError(exception, "Uma exceção não tratada ocorreu: {Message}", exception.Message);
+        }
 
         var problem = new ProblemDetails
         {
-            Status = StatusCodes.Status500InternalServerError,
-            Title = "Erro interno no servidor.",
+            Status = isBadRequest ? StatusCodes.Status400BadRequest : StatusCodes.Status500InternalServerError,
+            Title = isBadRequest ? "Requisição inválida." : "Erro interno no servidor.",
             Detail = exception.Message
         };
 
@@ -21,3 +29,4 @@ public class GlobalExceptionHandler(ILogger<GlobalExceptionHandler> logger) : IE
         return true;
     }
 }
+

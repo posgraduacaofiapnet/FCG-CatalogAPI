@@ -1,3 +1,5 @@
+using System.Data;
+using System.Text.Json;
 using FCG.Contracts;
 using MassTransit;
 using Microsoft.EntityFrameworkCore;
@@ -18,8 +20,13 @@ public sealed class MassTransitCatalogEventPublisher(IPublishEndpoint publisher,
     }
 }
 
-public sealed class CatalogService(CatalogDbContext dbContext, ICatalogEventPublisher publisher)
+public sealed class CatalogService(
+    CatalogDbContext dbContext,
+    ICatalogEventPublisher publisher,
+    IGameCatalogCache? gameListCache = null)
 {
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
     public async Task<GameResponse> CreateGameAsync(CreateGameRequest request, CancellationToken cancellationToken)
     {
         var game = new Game
@@ -31,11 +38,21 @@ public sealed class CatalogService(CatalogDbContext dbContext, ICatalogEventPubl
 
         dbContext.Games.Add(game);
         await dbContext.SaveChangesAsync(cancellationToken);
+        await InvalidateGameListCacheAsync(cancellationToken);
         return Map(game);
     }
 
     public async Task<PagedResult<GameResponse>> GetGamesAsync(PaginationParameters pagination, CancellationToken cancellationToken)
     {
+        if (gameListCache is not null)
+        {
+            var cached = await gameListCache.TryGetListAsync(pagination, cancellationToken);
+            if (cached is not null)
+            {
+                return cached;
+            }
+        }
+
         var query = dbContext.Games
             .Where(game => game.IsActive)
             .OrderBy(game => game.Title);
@@ -48,7 +65,14 @@ public sealed class CatalogService(CatalogDbContext dbContext, ICatalogEventPubl
             .Select(game => Map(game))
             .ToListAsync(cancellationToken);
 
-        return new PagedResult<GameResponse>(items, pagination.Page, pagination.PageSize, totalCount);
+        var result = new PagedResult<GameResponse>(items, pagination.Page, pagination.PageSize, totalCount);
+
+        if (gameListCache is not null)
+        {
+            await gameListCache.SetListAsync(pagination, result, cancellationToken);
+        }
+
+        return result;
     }
 
     public async Task<GameResponse?> GetGameAsync(Guid id, CancellationToken cancellationToken)
@@ -70,6 +94,7 @@ public sealed class CatalogService(CatalogDbContext dbContext, ICatalogEventPubl
         game.Price = request.Price;
 
         await dbContext.SaveChangesAsync(cancellationToken);
+        await InvalidateGameListCacheAsync(cancellationToken);
         return Map(game);
     }
 
@@ -83,11 +108,19 @@ public sealed class CatalogService(CatalogDbContext dbContext, ICatalogEventPubl
 
         game.IsActive = false;
         await dbContext.SaveChangesAsync(cancellationToken);
+        await InvalidateGameListCacheAsync(cancellationToken);
         return true;
     }
 
-    public async Task<IResult> PurchaseAsync(PurchaseGameRequest request, CancellationToken cancellationToken)
+    public async Task<IResult> PurchaseAsync(
+        PurchaseGameRequest request,
+        string userEmail,
+        CancellationToken cancellationToken)
     {
+        await using var transaction = dbContext.Database.IsRelational()
+            ? await dbContext.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
+            : null;
+
         var game = await dbContext.Games.FirstOrDefaultAsync(game => game.Id == request.GameId && game.IsActive, cancellationToken);
         if (game is null)
         {
@@ -103,30 +136,76 @@ public sealed class CatalogService(CatalogDbContext dbContext, ICatalogEventPubl
             return Results.Conflict(new { error = "Library.GameAlreadyOwned" });
         }
 
+        var placedAt = DateTimeOffset.UtcNow;
         var order = new PurchaseOrder
         {
             UserId = request.UserId,
             GameId = game.Id,
             GameTitle = game.Title,
+            UserEmail = userEmail,
             Price = game.Price,
-            Status = "Pending",
-            CreatedAt = DateTime.UtcNow
+            Status = OrderStatuses.Pending,
+            CreatedAt = placedAt.UtcDateTime
         };
 
+        var notification = new OrderPlacedNotification(
+            order.Id,
+            order.UserId,
+            order.GameId,
+            order.GameTitle,
+            order.Price,
+            order.UserEmail,
+            placedAt);
+
         dbContext.Orders.Add(order);
+        dbContext.OutboxMessages.Add(OutboxMessage.Create(NotificationEventTypes.OrderPlaced, notification, JsonOptions));
+        await publisher.PublishOrderPlacedAsync(
+            new OrderPlacedEvent(
+                order.Id,
+                order.UserId,
+                order.GameId,
+                order.GameTitle,
+                order.Price,
+                order.CreatedAt),
+            cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
 
-        await publisher.PublishOrderPlacedAsync(new OrderPlacedEvent(order.Id, order.UserId, order.GameId, order.GameTitle, order.Price, order.CreatedAt), cancellationToken);
+        if (transaction is not null)
+        {
+            await transaction.CommitAsync(cancellationToken);
+        }
 
         return Results.Accepted($"/api/orders/{order.Id}", new { order.Id, order.Status });
     }
 
     public async Task ProcessPaymentAsync(PaymentProcessedEvent payment, CancellationToken cancellationToken)
     {
+        await using var transaction = dbContext.Database.IsRelational()
+            ? await dbContext.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
+            : null;
+
         var order = await dbContext.Orders.FirstOrDefaultAsync(order => order.Id == payment.OrderId, cancellationToken);
         if (order is null)
         {
             return;
+        }
+
+        if (order.Status != OrderStatuses.Pending)
+        {
+            return;
+        }
+
+        if (order.UserId != payment.UserId
+            || order.GameId != payment.GameId
+            || order.GameTitle != payment.GameTitle
+            || order.Price != payment.Price)
+        {
+            throw new InvalidOperationException($"Payment data does not match order {payment.OrderId}.");
+        }
+
+        if (payment.Status is not (PaymentStatuses.Approved or PaymentStatuses.Rejected))
+        {
+            throw new InvalidOperationException($"Unsupported payment status '{payment.Status}'.");
         }
 
         order.Status = payment.Status;
@@ -148,7 +227,27 @@ public sealed class CatalogService(CatalogDbContext dbContext, ICatalogEventPubl
             }
         }
 
+        var processedAt = new DateTimeOffset(DateTime.SpecifyKind(payment.ProcessedAt, DateTimeKind.Utc));
+        var notification = new PaymentProcessedNotification(
+            order.Id,
+            order.UserId,
+            order.GameId,
+            order.GameTitle,
+            order.Price,
+            order.Status,
+            order.UserEmail,
+            processedAt);
+
+        dbContext.OutboxMessages.Add(OutboxMessage.Create(
+            NotificationEventTypes.PaymentProcessed,
+            notification,
+            JsonOptions));
+
         await dbContext.SaveChangesAsync(cancellationToken);
+        if (transaction is not null)
+        {
+            await transaction.CommitAsync(cancellationToken);
+        }
     }
 
     public async Task<IReadOnlyList<LibraryGameResponse>> GetLibraryAsync(Guid userId, CancellationToken cancellationToken)
@@ -163,6 +262,9 @@ public sealed class CatalogService(CatalogDbContext dbContext, ICatalogEventPubl
             .Select(result => new LibraryGameResponse(result.game.Id, result.game.Title, result.game.Price, result.item.AcquiredAt))
             .ToListAsync(cancellationToken);
     }
+
+    private Task InvalidateGameListCacheAsync(CancellationToken cancellationToken) =>
+        gameListCache?.InvalidateListAsync(cancellationToken) ?? Task.CompletedTask;
 
     private static GameResponse Map(Game game)
     {
