@@ -297,11 +297,40 @@ public sealed class CatalogServiceTests(CatalogFixture fixture) : IClassFixture<
         var afterDelete = await service.SearchGamesAsync("Cyber", 10, CancellationToken.None);
         Assert.Empty(afterDelete);
     }
+
+    [Fact]
+    public async Task ReindexGamesAsync_EnsuresIndexAndReindexesOnlyActiveGames()
+    {
+        await using var db = fixture.CreateDbContext();
+        db.Games.AddRange(
+            new Game { Title = "Cyber FIAP Origins", Description = "Aventura inicial", Price = 89.90m, IsActive = true },
+            new Game { Title = "Inactive Legacy Game", Description = "Descontinuado", Price = 19.90m, IsActive = false });
+        await db.SaveChangesAsync();
+
+        var search = new FakeGameSearchService();
+        var service = new CatalogService(db, new FakeCatalogEventPublisher(), gameSearch: search);
+
+        var reindexed = await service.ReindexGamesAsync(CancellationToken.None);
+        var hits = await service.SearchGamesAsync("Cybr", 10, CancellationToken.None);
+
+        Assert.True(search.IndexEnsured);
+        Assert.Equal(1, reindexed.IndexedCount);
+        Assert.Single(hits);
+        Assert.Equal("Cyber FIAP Origins", hits[0].Title);
+    }
 }
 
 public sealed class FakeGameSearchService : IGameSearchService
 {
     private readonly Dictionary<Guid, GameSearchDocument> _documents = [];
+
+    public bool IndexEnsured { get; private set; }
+
+    public Task EnsureIndexAsync(CancellationToken cancellationToken)
+    {
+        IndexEnsured = true;
+        return Task.CompletedTask;
+    }
 
     public Task IndexGameAsync(Game game, CancellationToken cancellationToken)
     {

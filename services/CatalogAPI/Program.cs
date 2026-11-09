@@ -104,7 +104,9 @@ var elasticsearchUrl = builder.Configuration.GetConnectionString("Elasticsearch"
     ?? "http://localhost:9200";
 builder.Services.AddSingleton(_ =>
 {
-    var settings = new ElasticsearchClientSettings(new Uri(elasticsearchUrl));
+    var settings = new ElasticsearchClientSettings(new Uri(elasticsearchUrl))
+        .MaximumRetries(3)
+        .RequestTimeout(TimeSpan.FromSeconds(10));
     var apiKey = builder.Configuration["Elasticsearch:ApiKey"];
     var username = builder.Configuration["Elasticsearch:Username"];
     var password = builder.Configuration["Elasticsearch:Password"];
@@ -121,6 +123,7 @@ builder.Services.AddSingleton(_ =>
     return new ElasticsearchClient(settings);
 });
 builder.Services.AddSingleton<IGameSearchService, ElasticsearchGameSearchService>();
+builder.Services.AddHostedService<ElasticsearchIndexInitializerHostedService>();
 
 builder.Services.AddScoped<CatalogService>();
 builder.Services.AddScoped<CorrelationContext>();
@@ -316,6 +319,10 @@ app.MapDelete("/api/games/{id:guid}", async (Guid id, CatalogService service, Ca
     var deleted = await service.DeleteGameAsync(id, cancellationToken);
     return deleted ? Results.NoContent() : Results.NotFound(new { error = "Games.NotFound" });
 }).RequireAuthorization(policy => policy.RequireRole("Admin"));
+
+app.MapPost("/api/games/reindex", async (CatalogService service, CancellationToken cancellationToken) =>
+    Results.Ok(await service.ReindexGamesAsync(cancellationToken)))
+    .RequireAuthorization(policy => policy.RequireRole("Admin"));
 
 app.MapPost("/api/library/purchase", async (
     PurchaseGameRequest request,

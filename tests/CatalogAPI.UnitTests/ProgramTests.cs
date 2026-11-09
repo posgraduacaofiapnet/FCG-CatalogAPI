@@ -158,13 +158,18 @@ public sealed class ProgramTests : IClassFixture<CatalogApiFactory>
         var lowGame = await createdLow.Content.ReadFromJsonAsync<GameResponse>();
 
         var badRequest = await client.GetAsync("/search");
+        var reindexResponse = await admin.PostAsync("/api/games/reindex", null);
         var fuzzyResponse = await client.GetAsync("/search?q=Eldn");
         var aliasResponse = await client.GetAsync("/api/games/search?query=Eldn&limit=5");
 
+        var reindex = await reindexResponse.Content.ReadFromJsonAsync<ReindexGamesResponse>();
         var hits = await fuzzyResponse.Content.ReadFromJsonAsync<List<GameSearchResult>>();
         var aliasHits = await aliasResponse.Content.ReadFromJsonAsync<List<GameSearchResult>>();
 
         Assert.Equal(HttpStatusCode.BadRequest, badRequest.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, reindexResponse.StatusCode);
+        Assert.NotNull(reindex);
+        Assert.True(reindex.IndexedCount >= 2);
         Assert.Equal(HttpStatusCode.OK, fuzzyResponse.StatusCode);
         Assert.Equal(HttpStatusCode.OK, aliasResponse.StatusCode);
         Assert.NotNull(hits);

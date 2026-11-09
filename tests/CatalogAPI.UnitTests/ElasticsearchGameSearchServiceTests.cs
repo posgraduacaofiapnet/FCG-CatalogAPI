@@ -82,6 +82,7 @@ public sealed class ElasticsearchGameSearchServiceTests
             IsActive = true
         };
 
+        await sut.EnsureIndexAsync(CancellationToken.None);
         await sut.IndexGameAsync(game, CancellationToken.None);
         var results = await sut.SearchAsync("Cybr", 10, CancellationToken.None);
         var emptyResults = await sut.SearchAsync("   ", 10, CancellationToken.None);

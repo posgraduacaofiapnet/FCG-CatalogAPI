@@ -21,8 +21,11 @@ public sealed record GameSearchResult(
     decimal Price,
     double Score);
 
+public sealed record ReindexGamesResponse(int IndexedCount);
+
 public interface IGameSearchService
 {
+    Task EnsureIndexAsync(CancellationToken cancellationToken);
     Task IndexGameAsync(Game game, CancellationToken cancellationToken);
     Task RemoveGameAsync(Guid gameId, CancellationToken cancellationToken);
     Task<IReadOnlyList<GameSearchResult>> SearchAsync(string query, int limit, CancellationToken cancellationToken);
@@ -38,6 +41,45 @@ public sealed class ElasticsearchGameSearchService(
     public const int MaxLimit = 100;
 
     private readonly string _indexName = configuration["Elasticsearch:Index"] ?? DefaultIndexName;
+
+    public async Task EnsureIndexAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var existsResponse = await client.Indices.ExistsAsync(_indexName, cancellationToken);
+            if (existsResponse.Exists)
+            {
+                return;
+            }
+
+            var createResponse = await client.Indices.CreateAsync(_indexName, create => create
+                .Mappings(mappings => mappings
+                    .Properties<GameSearchDocument>(props => props
+                        .Keyword(doc => doc.Id)
+                        .Text(doc => doc.Title, text => text.Analyzer("brazilian"))
+                        .Text(doc => doc.Description, text => text.Analyzer("brazilian"))
+                        .DoubleNumber(doc => doc.Price)
+                        .Boolean(doc => doc.IsActive)
+                        .Date(doc => doc.UpdatedAt))),
+                cancellationToken);
+
+            if (!createResponse.IsValidResponse)
+            {
+                logger.LogWarning(
+                    "Nao foi possivel criar indice '{IndexName}' antecipadamente no Elasticsearch: {DebugInformation}",
+                    _indexName,
+                    createResponse.DebugInformation);
+            }
+            else
+            {
+                logger.LogInformation("Indice Elasticsearch '{IndexName}' criado com mapeamento otimizado (analyzer=brazilian).", _indexName);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Erro ao verificar/criar indice '{IndexName}' no Elasticsearch.", _indexName);
+        }
+    }
 
     public async Task IndexGameAsync(Game game, CancellationToken cancellationToken)
     {
@@ -124,9 +166,8 @@ public sealed class ElasticsearchGameSearchService(
                     .Must(m => m
                         .MultiMatch(mm => mm
                             .Query(normalizedQuery)
-                            .Fields(Infer.Fields<GameSearchDocument>(
-                                doc => doc.Title,
-                                doc => doc.Description))
+                            .Fields(Infer.Field<GameSearchDocument>(doc => doc.Title, 3.0)
+                                .And(Infer.Field<GameSearchDocument>(doc => doc.Description)))
                             .Fuzziness(new Fuzziness("AUTO"))
                             .PrefixLength(1)
                             .Operator(Operator.Or)))
@@ -162,4 +203,29 @@ public sealed class ElasticsearchGameSearchService(
             .ToList();
     }
 }
+
+public sealed class ElasticsearchIndexInitializerHostedService(
+    IServiceScopeFactory scopeFactory,
+    ILogger<ElasticsearchIndexInitializerHostedService> logger) : IHostedService
+{
+    public async Task StartAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var catalogService = scope.ServiceProvider.GetRequiredService<CatalogService>();
+            var result = await catalogService.ReindexGamesAsync(cancellationToken);
+            logger.LogInformation(
+                "Sincronizacao inicial do Elasticsearch concluida ({IndexedCount} jogos ativos indexados).",
+                result.IndexedCount);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Falha nao-fatal durante a sincronizacao inicial do indice no Elasticsearch.");
+        }
+    }
+
+    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+}
+
 

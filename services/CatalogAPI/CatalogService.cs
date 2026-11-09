@@ -129,6 +129,28 @@ public sealed class CatalogService(
         return await gameSearch.SearchAsync(query, limit, cancellationToken);
     }
 
+    public async Task<ReindexGamesResponse> ReindexGamesAsync(CancellationToken cancellationToken)
+    {
+        if (gameSearch is null)
+        {
+            return new ReindexGamesResponse(0);
+        }
+
+        await gameSearch.EnsureIndexAsync(cancellationToken);
+
+        var activeGames = await dbContext.Games
+            .AsNoTracking()
+            .Where(game => game.IsActive)
+            .ToListAsync(cancellationToken);
+
+        foreach (var game in activeGames)
+        {
+            await gameSearch.IndexGameAsync(game, cancellationToken);
+        }
+
+        return new ReindexGamesResponse(activeGames.Count);
+    }
+
     public async Task<IResult> PurchaseAsync(
         PurchaseGameRequest request,
         string userEmail,
