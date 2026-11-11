@@ -1,4 +1,4 @@
-name: Validate and publish latest container
+name: Build, publish and deploy
 
 on:
   pull_request:
@@ -11,16 +11,19 @@ on:
 
 permissions:
   contents: read
-  packages: write
+  id-token: write
 
 concurrency:
-  group: ghcr-${{ github.repository }}-${{ github.ref }}
+  group: ecr-eks-${{ github.repository }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: posgraduacaofiapnet/fcg-catalog-api
-  PACKAGE_NAME: fcg-catalog-api
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  ECR_REPOSITORY: fcg-catalog-api
+  DEPLOYMENT_NAME: catalog-api
+  CONTAINER_NAME: catalog-api
+  DOCKERFILE: services/CatalogAPI/Dockerfile
+  TEST_PROJECT: tests/CatalogAPI.UnitTests/CatalogAPI.UnitTests.csproj
 
 jobs:
   validate:
@@ -35,9 +38,9 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: Run tests
-        run: dotnet test tests/CatalogAPI.UnitTests/CatalogAPI.UnitTests.csproj --configuration Release
+        run: dotnet test ${{ env.TEST_PROJECT }} --configuration Release
 
-  publish:
+  publish-and-deploy:
     if: github.event_name != 'pull_request'
     needs: validate
     runs-on: ubuntu-latest
@@ -45,24 +48,36 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@a03048d87541d1d9fcf2ecf528a4a65ba57a69aa # v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2
+
+      - name: Set image URI
+        id: image
+        run: |
+          IMAGE_URI="${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
+          echo "uri=${IMAGE_URI}" >> "$GITHUB_OUTPUT"
+          echo "Image: ${IMAGE_URI}"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and publish latest image
+      - name: Build and push image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
-          file: services/CatalogAPI/Dockerfile
+          file: ${{ env.DOCKERFILE }}
           platforms: linux/amd64
           push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          tags: |
+            ${{ steps.image.outputs.uri }}
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -71,10 +86,25 @@ jobs:
           provenance: false
           sbom: false
 
-      - name: Keep only the latest package version
-        uses: actions/delete-package-versions@e5bc658cc4c965c472efe991f8beea3981499c55 # v5
+      - name: Scan image for vulnerabilities
+        uses: aquasecurity/trivy-action@b6646a65eba331498ece3438de8ded303fb095cf # v0.33.1
+        continue-on-error: true
         with:
-          package-name: ${{ env.PACKAGE_NAME }}
-          package-type: container
-          min-versions-to-keep: 1
-          token: ${{ secrets.GITHUB_TOKEN }}
+          image-ref: ${{ steps.image.outputs.uri }}
+          format: table
+          exit-code: "0"
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --name "${{ secrets.EKS_CLUSTER_NAME }}" \
+            --region "${{ env.AWS_REGION }}"
+
+      - name: Deploy with rolling update
+        run: |
+          kubectl set image "deployment/${{ env.DEPLOYMENT_NAME }}" \
+            "${{ env.CONTAINER_NAME }}=${{ steps.image.outputs.uri }}"
+          kubectl rollout status "deployment/${{ env.DEPLOYMENT_NAME }}" --timeout=180s
+          kubectl get pods -l "app=${{ env.DEPLOYMENT_NAME }}" -o wide
