@@ -3,6 +3,8 @@ using System.Text;
 using Amazon;
 using Amazon.DynamoDBv2;
 using CatalogAPI;
+using Elastic.Clients.Elasticsearch;
+using Elastic.Transport;
 using Prometheus;
 using FluentValidation;
 using MassTransit;
@@ -97,6 +99,32 @@ builder.Services.AddSingleton(sp => sp.GetRequiredService<IMongoClient>().GetDat
 builder.Services.AddSingleton<IGameReviewStore, MongoGameReviewStore>();
 builder.Services.AddScoped<GameReviewService>();
 
+var elasticsearchUrl = builder.Configuration.GetConnectionString("Elasticsearch")
+    ?? builder.Configuration["Elasticsearch:Url"]
+    ?? "http://localhost:9200";
+builder.Services.AddSingleton(_ =>
+{
+    var settings = new ElasticsearchClientSettings(new Uri(elasticsearchUrl))
+        .MaximumRetries(3)
+        .RequestTimeout(TimeSpan.FromSeconds(10));
+    var apiKey = builder.Configuration["Elasticsearch:ApiKey"];
+    var username = builder.Configuration["Elasticsearch:Username"];
+    var password = builder.Configuration["Elasticsearch:Password"];
+
+    if (!string.IsNullOrWhiteSpace(apiKey))
+    {
+        settings = settings.Authentication(new ApiKey(apiKey));
+    }
+    else if (!string.IsNullOrWhiteSpace(username) && !string.IsNullOrWhiteSpace(password))
+    {
+        settings = settings.Authentication(new BasicAuthentication(username, password));
+    }
+
+    return new ElasticsearchClient(settings);
+});
+builder.Services.AddSingleton<IGameSearchService, ElasticsearchGameSearchService>();
+builder.Services.AddHostedService<ElasticsearchIndexInitializerHostedService>();
+
 builder.Services.AddScoped<CatalogService>();
 builder.Services.AddScoped<CorrelationContext>();
 builder.Services.AddScoped<ICatalogEventPublisher, MassTransitCatalogEventPublisher>();
@@ -175,6 +203,32 @@ static string? GetUserEmail(ClaimsPrincipal user) =>
     user.FindFirstValue(ClaimTypes.Email) ?? user.FindFirstValue("email");
 
 app.MapGet("/health", () => Results.Ok(new { status = "Healthy", service = "CatalogAPI" }));
+
+static async Task<IResult> ExecuteGameSearchAsync(
+    string? q,
+    string? query,
+    int? limit,
+    CatalogService service,
+    CancellationToken cancellationToken)
+{
+    var searchTerm = !string.IsNullOrWhiteSpace(q) ? q : query;
+    if (string.IsNullOrWhiteSpace(searchTerm))
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            ["q"] = ["O parâmetro de busca 'q' é obrigatório."]
+        });
+    }
+
+    var results = await service.SearchGamesAsync(
+        searchTerm,
+        limit ?? ElasticsearchGameSearchService.DefaultLimit,
+        cancellationToken);
+    return Results.Ok(results);
+}
+
+app.MapGet("/search", ExecuteGameSearchAsync);
+app.MapGet("/api/games/search", ExecuteGameSearchAsync);
 
 app.MapGet("/api/games", async (
     CatalogService service,
@@ -265,6 +319,10 @@ app.MapDelete("/api/games/{id:guid}", async (Guid id, CatalogService service, Ca
     var deleted = await service.DeleteGameAsync(id, cancellationToken);
     return deleted ? Results.NoContent() : Results.NotFound(new { error = "Games.NotFound" });
 }).RequireAuthorization(policy => policy.RequireRole("Admin"));
+
+app.MapPost("/api/games/reindex", async (CatalogService service, CancellationToken cancellationToken) =>
+    Results.Ok(await service.ReindexGamesAsync(cancellationToken)))
+    .RequireAuthorization(policy => policy.RequireRole("Admin"));
 
 app.MapPost("/api/library/purchase", async (
     PurchaseGameRequest request,

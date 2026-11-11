@@ -268,6 +268,187 @@ public sealed class CatalogServiceTests(CatalogFixture fixture) : IClassFixture<
         Assert.Empty(await service.GetLibraryAsync(userId, CancellationToken.None));
         Assert.Empty(await db.LibraryItems.ToListAsync());
     }
+
+    [Fact]
+    public async Task CreateUpdateAndDeleteGame_SynchronizesSearchIndex()
+    {
+        await using var db = fixture.CreateDbContext();
+        var search = new FakeGameSearchService();
+        var service = new CatalogService(db, new FakeCatalogEventPublisher(), gameSearch: search);
+
+        var created = await service.CreateGameAsync(
+            new CreateGameRequest("Cyber FIAP Odyssey", "RPG futurista em mundo aberto", 199.90m),
+            CancellationToken.None);
+
+        var initialSearch = await service.SearchGamesAsync("Cybr FIAP", 10, CancellationToken.None);
+        Assert.Single(initialSearch);
+        Assert.Equal(created.Id, initialSearch[0].Id);
+
+        await service.UpdateGameAsync(
+            created.Id,
+            new UpdateGameRequest("Cyber FIAP Remastered", "Edicao definitiva remasterizada", 249.90m),
+            CancellationToken.None);
+
+        var updatedSearch = await service.SearchGamesAsync("Remasterd", 10, CancellationToken.None);
+        Assert.Single(updatedSearch);
+        Assert.Equal("Cyber FIAP Remastered", updatedSearch[0].Title);
+
+        await service.DeleteGameAsync(created.Id, CancellationToken.None);
+        var afterDelete = await service.SearchGamesAsync("Cyber", 10, CancellationToken.None);
+        Assert.Empty(afterDelete);
+    }
+
+    [Fact]
+    public async Task ReindexGamesAsync_EnsuresIndexAndReindexesOnlyActiveGames()
+    {
+        await using var db = fixture.CreateDbContext();
+        db.Games.AddRange(
+            new Game { Title = "Cyber FIAP Origins", Description = "Aventura inicial", Price = 89.90m, IsActive = true },
+            new Game { Title = "Inactive Legacy Game", Description = "Descontinuado", Price = 19.90m, IsActive = false });
+        await db.SaveChangesAsync();
+
+        var search = new FakeGameSearchService();
+        var service = new CatalogService(db, new FakeCatalogEventPublisher(), gameSearch: search);
+
+        var reindexed = await service.ReindexGamesAsync(CancellationToken.None);
+        var hits = await service.SearchGamesAsync("Cybr", 10, CancellationToken.None);
+
+        Assert.True(search.IndexEnsured);
+        Assert.Equal(1, reindexed.IndexedCount);
+        Assert.Single(hits);
+        Assert.Equal("Cyber FIAP Origins", hits[0].Title);
+    }
+}
+
+public sealed class FakeGameSearchService : IGameSearchService
+{
+    private readonly Dictionary<Guid, GameSearchDocument> _documents = [];
+
+    public bool IndexEnsured { get; private set; }
+
+    public Task EnsureIndexAsync(CancellationToken cancellationToken)
+    {
+        IndexEnsured = true;
+        return Task.CompletedTask;
+    }
+
+    public Task IndexGameAsync(Game game, CancellationToken cancellationToken)
+    {
+        _documents[game.Id] = new GameSearchDocument
+        {
+            Id = game.Id,
+            Title = game.Title,
+            Description = game.Description,
+            Price = game.Price,
+            IsActive = game.IsActive,
+            UpdatedAt = DateTime.UtcNow
+        };
+        return Task.CompletedTask;
+    }
+
+    public Task RemoveGameAsync(Guid gameId, CancellationToken cancellationToken)
+    {
+        _documents.Remove(gameId);
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyList<GameSearchResult>> SearchAsync(
+        string query,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return Task.FromResult<IReadOnlyList<GameSearchResult>>([]);
+        }
+
+        var tokens = query
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(t => t.ToLowerInvariant())
+            .ToArray();
+
+        var results = _documents.Values
+            .Where(doc => doc.IsActive)
+            .Select(doc => new
+            {
+                Doc = doc,
+                Score = ComputeFuzzyScore(doc, tokens)
+            })
+            .Where(item => item.Score > 0)
+            .OrderByDescending(item => item.Score)
+            .Take(Math.Clamp(limit <= 0 ? 20 : limit, 1, 100))
+            .Select(item => new GameSearchResult(
+                item.Doc.Id,
+                item.Doc.Title,
+                item.Doc.Description,
+                item.Doc.Price,
+                item.Score))
+            .ToList();
+
+        return Task.FromResult<IReadOnlyList<GameSearchResult>>(results);
+    }
+
+    private static double ComputeFuzzyScore(GameSearchDocument doc, string[] queryTokens)
+    {
+        var titleWords = doc.Title
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(w => w.ToLowerInvariant())
+            .ToArray();
+        var descWords = doc.Description
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(w => w.ToLowerInvariant())
+            .ToArray();
+
+        double score = 0;
+        foreach (var token in queryTokens)
+        {
+            foreach (var word in titleWords)
+            {
+                if (word.Equals(token, StringComparison.Ordinal))
+                {
+                    score += 3.0;
+                }
+                else if (word.Contains(token, StringComparison.Ordinal) || LevenshteinDistance(word, token) <= 2)
+                {
+                    score += 2.0;
+                }
+            }
+
+            foreach (var word in descWords)
+            {
+                if (word.Equals(token, StringComparison.Ordinal))
+                {
+                    score += 1.5;
+                }
+                else if (word.Contains(token, StringComparison.Ordinal) || LevenshteinDistance(word, token) <= 2)
+                {
+                    score += 1.0;
+                }
+            }
+        }
+
+        return score;
+    }
+
+    private static int LevenshteinDistance(string source, string target)
+    {
+        var dp = new int[source.Length + 1, target.Length + 1];
+        for (var i = 0; i <= source.Length; i++) dp[i, 0] = i;
+        for (var j = 0; j <= target.Length; j++) dp[0, j] = j;
+
+        for (var i = 1; i <= source.Length; i++)
+        {
+            for (var j = 1; j <= target.Length; j++)
+            {
+                var cost = source[i - 1] == target[j - 1] ? 0 : 1;
+                dp[i, j] = Math.Min(
+                    Math.Min(dp[i - 1, j] + 1, dp[i, j - 1] + 1),
+                    dp[i - 1, j - 1] + cost);
+            }
+        }
+
+        return dp[source.Length, target.Length];
+    }
 }
 
 public sealed class FakeGameCatalogCache : IGameCatalogCache

@@ -10,6 +10,8 @@ data:
   Jwt__Audience: FCG
   ConnectionStrings__Redis: redis:6379
   ConnectionStrings__MongoDB: mongodb://mongo:27017
+  ConnectionStrings__Elasticsearch: http://elasticsearch:9200
+  Elasticsearch__Index: fcg-games
   Mongo__Database: fcg_catalog
   Notifications__DynamoDbTableName: fcg-notification-idempotency
   AWS_REGION: us-east-1

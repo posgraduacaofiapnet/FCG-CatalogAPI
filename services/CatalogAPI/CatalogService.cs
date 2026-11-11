@@ -23,7 +23,8 @@ public sealed class MassTransitCatalogEventPublisher(IPublishEndpoint publisher,
 public sealed class CatalogService(
     CatalogDbContext dbContext,
     ICatalogEventPublisher publisher,
-    IGameCatalogCache? gameListCache = null)
+    IGameCatalogCache? gameListCache = null,
+    IGameSearchService? gameSearch = null)
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -39,6 +40,7 @@ public sealed class CatalogService(
         dbContext.Games.Add(game);
         await dbContext.SaveChangesAsync(cancellationToken);
         await InvalidateGameListCacheAsync(cancellationToken);
+        await IndexGameSearchAsync(game, cancellationToken);
         return Map(game);
     }
 
@@ -95,6 +97,7 @@ public sealed class CatalogService(
 
         await dbContext.SaveChangesAsync(cancellationToken);
         await InvalidateGameListCacheAsync(cancellationToken);
+        await IndexGameSearchAsync(game, cancellationToken);
         return Map(game);
     }
 
@@ -109,7 +112,43 @@ public sealed class CatalogService(
         game.IsActive = false;
         await dbContext.SaveChangesAsync(cancellationToken);
         await InvalidateGameListCacheAsync(cancellationToken);
+        await RemoveGameSearchAsync(game.Id, cancellationToken);
         return true;
+    }
+
+    public async Task<IReadOnlyList<GameSearchResult>> SearchGamesAsync(
+        string query,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        if (gameSearch is null)
+        {
+            return [];
+        }
+
+        return await gameSearch.SearchAsync(query, limit, cancellationToken);
+    }
+
+    public async Task<ReindexGamesResponse> ReindexGamesAsync(CancellationToken cancellationToken)
+    {
+        if (gameSearch is null)
+        {
+            return new ReindexGamesResponse(0);
+        }
+
+        await gameSearch.EnsureIndexAsync(cancellationToken);
+
+        var activeGames = await dbContext.Games
+            .AsNoTracking()
+            .Where(game => game.IsActive)
+            .ToListAsync(cancellationToken);
+
+        foreach (var game in activeGames)
+        {
+            await gameSearch.IndexGameAsync(game, cancellationToken);
+        }
+
+        return new ReindexGamesResponse(activeGames.Count);
     }
 
     public async Task<IResult> PurchaseAsync(
@@ -265,6 +304,12 @@ public sealed class CatalogService(
 
     private Task InvalidateGameListCacheAsync(CancellationToken cancellationToken) =>
         gameListCache?.InvalidateListAsync(cancellationToken) ?? Task.CompletedTask;
+
+    private Task IndexGameSearchAsync(Game game, CancellationToken cancellationToken) =>
+        gameSearch?.IndexGameAsync(game, cancellationToken) ?? Task.CompletedTask;
+
+    private Task RemoveGameSearchAsync(Guid gameId, CancellationToken cancellationToken) =>
+        gameSearch?.RemoveGameAsync(gameId, cancellationToken) ?? Task.CompletedTask;
 
     private static GameResponse Map(Game game)
     {

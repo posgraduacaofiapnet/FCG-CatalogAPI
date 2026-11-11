@@ -135,6 +135,51 @@ public sealed class ProgramTests : IClassFixture<CatalogApiFactory>
         Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
     }
 
+    [Fact]
+    public async Task SearchEndpoints_SupportFuzzySearchAndRelevanceOrdering()
+    {
+        using var admin = AuthenticatedClient("Admin", Guid.NewGuid(), "admin@example.com");
+        using var client = _factory.CreateClient();
+
+        var createdHigh = await admin.PostAsJsonAsync("/api/games", new
+        {
+            title = "Elden Ring Shadow",
+            description = "Aventura epica Elden Ring em mundo aberto",
+            price = 199.90m
+        });
+        var highGame = await createdHigh.Content.ReadFromJsonAsync<GameResponse>();
+
+        var createdLow = await admin.PostAsJsonAsync("/api/games", new
+        {
+            title = "Dark Fantasy Quest",
+            description = "Inspirado em Elden",
+            price = 99.90m
+        });
+        var lowGame = await createdLow.Content.ReadFromJsonAsync<GameResponse>();
+
+        var badRequest = await client.GetAsync("/search");
+        var reindexResponse = await admin.PostAsync("/api/games/reindex", null);
+        var fuzzyResponse = await client.GetAsync("/search?q=Eldn");
+        var aliasResponse = await client.GetAsync("/api/games/search?query=Eldn&limit=5");
+
+        var reindex = await reindexResponse.Content.ReadFromJsonAsync<ReindexGamesResponse>();
+        var hits = await fuzzyResponse.Content.ReadFromJsonAsync<List<GameSearchResult>>();
+        var aliasHits = await aliasResponse.Content.ReadFromJsonAsync<List<GameSearchResult>>();
+
+        Assert.Equal(HttpStatusCode.BadRequest, badRequest.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, reindexResponse.StatusCode);
+        Assert.NotNull(reindex);
+        Assert.True(reindex.IndexedCount >= 2);
+        Assert.Equal(HttpStatusCode.OK, fuzzyResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, aliasResponse.StatusCode);
+        Assert.NotNull(hits);
+        Assert.NotNull(aliasHits);
+        Assert.True(hits.Count >= 2);
+        Assert.Equal(highGame!.Id, hits[0].Id);
+        Assert.Contains(hits, h => h.Id == lowGame!.Id);
+        Assert.True(hits[0].Score >= hits[1].Score);
+    }
+
     private HttpClient AuthenticatedClient(string role, Guid userId, string email)
     {
         var client = _factory.CreateClient();
@@ -174,6 +219,10 @@ public sealed class CatalogApiFactory : WebApplicationFactory<Program>
             services.AddDbContext<CatalogDbContext>(options => options.UseInMemoryDatabase(_databaseName));
             services.RemoveAll<IGameReviewStore>();
             services.AddSingleton<IGameReviewStore, FakeGameReviewStore>();
+            services.RemoveAll<IGameSearchService>();
+            services.AddSingleton<IGameSearchService, FakeGameSearchService>();
+            services.RemoveAll<Microsoft.Extensions.Caching.Distributed.IDistributedCache>();
+            services.AddDistributedMemoryCache();
             services.RemoveAll<ICatalogEventPublisher>();
             services.AddScoped<ICatalogEventPublisher, FakeCatalogEventPublisher>();
             services.RemoveAll<INotificationProcessingStatusReader>();
