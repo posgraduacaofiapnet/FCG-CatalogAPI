@@ -15,6 +15,8 @@ Microsservico responsavel pelo catalogo de jogos, inicio do fluxo de compra e at
 - `GET /api/games/{id}/reviews`
 - `GET /health`
 - `GET /metrics`
+- `GET /search` e `GET /api/games/search` (públicos; `q` e `limit`)
+- `POST /api/games/reindex` (JWT com role `Admin`)
 - `GET /api/notifications/status` (JWT com role `Admin`)
 - `GET /api/notifications/status/{eventId}` (JWT com role `Admin`)
 
@@ -39,9 +41,12 @@ Microsservico responsavel pelo catalogo de jogos, inicio do fluxo de compra e at
 - `Notifications__DynamoDbTableName`
 - `Notifications__DynamoDbServiceUrl`
 - `AWS_REGION`
+- `ConnectionStrings__Elasticsearch` ou `Elasticsearch__Url`
+- `Elasticsearch__Index`
+- `Elasticsearch__ApiKey` ou `Elasticsearch__Username` / `Elasticsearch__Password`
 
 Este projeto já pertence ao repositório separado `FCG-CatalogAPI`. O [README principal](../../README.md)
 documenta a Fase 4, configurações, autorização, testes, cache Redis e avaliações MongoDB.
-A busca está na branch `feature/elasticsearch`, fora da `master`; não há `/search` nesta revisão
-da branch principal. Notificações atuais usam outbox SQL/SQS/Lambda, separadamente do fluxo de
+A busca está integrada à `master`, com fuzzy search, score e sincronização/reindexação.
+O workflow publica no ECR e faz rollout no EKS. Notificações usam outbox SQL/SQS/Lambda, separadamente do fluxo de
 pagamento no RabbitMQ.
