@@ -202,7 +202,7 @@ static bool IsOwner(ClaimsPrincipal user, Guid userId)
 static string? GetUserEmail(ClaimsPrincipal user) =>
     user.FindFirstValue(ClaimTypes.Email) ?? user.FindFirstValue("email");
 
-app.MapGet("/health", () => Results.Ok(new { status = "Healthy", service = "CatalogAPI" }));
+app.MapGet("/health", () => Results.Ok(new { status = "Healthy - Fase 4 Live Deploy OK", service = "CatalogAPI" }));
 
 static async Task<IResult> ExecuteGameSearchAsync(
     string? q,
